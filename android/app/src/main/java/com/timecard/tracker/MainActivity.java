@@ -42,6 +42,7 @@ import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -90,18 +91,27 @@ public class MainActivity extends Activity {
     private int totalWeeksToSync = 0;
     private int weeksSyncedCount = 0;
 
+    private static byte[] readFileFully(File file) throws IOException {
+        try (FileInputStream fis = new FileInputStream(file);
+             ByteArrayOutputStream baos = new ByteArrayOutputStream((int) Math.min(file.length(), 65536))) {
+            byte[] buf = new byte[8192];
+            int len;
+            while ((len = fis.read(buf)) > 0) {
+                baos.write(buf, 0, len);
+            }
+            return baos.toByteArray();
+        }
+    }
+
     private String getPortalBaseUrl() {
         try {
             File f = new File(getFilesDir(), PORTAL_CFG_FILENAME);
             if (f.exists()) {
-                try (FileInputStream fis = new FileInputStream(f)) {
-                    byte[] data = new byte[(int) f.length()];
-                    int read = fis.read(data);
-                    if (read > 0) {
-                        JSONObject obj = new JSONObject(new String(data, 0, read, StandardCharsets.UTF_8));
-                        String base = obj.optString("base_url", "");
-                        if (!base.isEmpty()) return base;
-                    }
+                byte[] data = readFileFully(f);
+                if (data.length > 0) {
+                    JSONObject obj = new JSONObject(new String(data, StandardCharsets.UTF_8));
+                    String base = obj.optString("base_url", "");
+                    if (!base.isEmpty()) return base;
                 }
             }
         } catch (Exception ignored) {}
@@ -343,15 +353,10 @@ public class MainActivity extends Activity {
             if (shiftDate != null && !shiftDate.isEmpty()) {
                 intent.putExtra(EXTRA_SHIFT_DATE, shiftDate);
             }
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                flags |= PendingIntent.FLAG_IMMUTABLE;
-            }
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
             PendingIntent pendingIntent = PendingIntent.getActivity(this, notifId, intent, flags);
 
-            Notification.Builder builder = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                    ? new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
-                    : new Notification.Builder(this);
+            Notification.Builder builder = new Notification.Builder(this, NOTIFICATION_CHANNEL_ID);
 
             builder.setSmallIcon(R.drawable.ic_launcher)
                     .setContentTitle(title != null ? title : "New Timecard Added")
@@ -369,7 +374,6 @@ public class MainActivity extends Activity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -399,12 +403,9 @@ public class MainActivity extends Activity {
         try {
             File f = new File(getFilesDir(), OTA_VERSION_FILENAME);
             if (f.exists()) {
-                try (FileInputStream fis = new FileInputStream(f)) {
-                    byte[] b = new byte[(int) f.length()];
-                    int read = fis.read(b);
-                    if (read > 0) {
-                        return new JSONObject(new String(b, StandardCharsets.UTF_8));
-                    }
+                byte[] b = readFileFully(f);
+                if (b.length > 0) {
+                    return new JSONObject(new String(b, StandardCharsets.UTF_8));
                 }
             }
         } catch (Exception ignored) {}
@@ -493,14 +494,14 @@ public class MainActivity extends Activity {
                 }
 
                 String jsonStr;
-                try (InputStream in = conn.getInputStream()) {
-                    byte[] buf = new byte[16384];
+                try (InputStream in = conn.getInputStream();
+                     ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                    byte[] buf = new byte[8192];
                     int r;
-                    StringBuilder sb = new StringBuilder();
                     while ((r = in.read(buf)) > 0) {
-                        sb.append(new String(buf, 0, r, StandardCharsets.UTF_8));
+                        baos.write(buf, 0, r);
                     }
-                    jsonStr = sb.toString();
+                    jsonStr = baos.toString("UTF-8");
                 }
 
                 JSONObject remote = new JSONObject(jsonStr);
@@ -985,13 +986,8 @@ public class MainActivity extends Activity {
             try {
                 File f = new File(getFilesDir(), STORE_FILENAME);
                 if (!f.exists()) return "";
-                try (FileInputStream fis = new FileInputStream(f)) {
-                    byte[] data = new byte[(int) f.length()];
-                    int read = fis.read(data);
-                    if (read > 0) {
-                        return new String(data, 0, read, StandardCharsets.UTF_8);
-                    }
-                }
+                byte[] data = readFileFully(f);
+                return new String(data, StandardCharsets.UTF_8);
             } catch (Exception ignored) {}
             return "";
         }
@@ -1008,10 +1004,12 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
-        public void saveArchiveJson(String json) {
-            if (json == null || json.trim().isEmpty()) return;
-            try {
-                File f = new File(getFilesDir(), ARCHIVE_FILENAME);
+        public void saveArchiveJson(final String jsonInput) {
+            if (jsonInput == null || jsonInput.trim().isEmpty()) return;
+            new Thread(() -> {
+                try {
+                    String json = jsonInput;
+                    File f = new File(getFilesDir(), ARCHIVE_FILENAME);
                 JSONObject incoming = new JSONObject(json);
                 JSONArray incomingWeeks = incoming.optJSONArray("archived_weeks");
                 JSONObject incomingDetails = incoming.optJSONObject("week_details");
@@ -1019,11 +1017,10 @@ public class MainActivity extends Activity {
 
                 // Cumulatively merge with existing archive file so older months are never deleted
                 if (f.exists() && f.length() > 0) {
-                    try (FileInputStream fis = new FileInputStream(f)) {
-                        byte[] existingBytes = new byte[(int) f.length()];
-                        int read = fis.read(existingBytes);
-                        if (read > 0) {
-                            JSONObject existing = new JSONObject(new String(existingBytes, 0, read, StandardCharsets.UTF_8));
+                    try {
+                        byte[] existingBytes = readFileFully(f);
+                        if (existingBytes.length > 0) {
+                            JSONObject existing = new JSONObject(new String(existingBytes, StandardCharsets.UTF_8));
                             JSONArray existingWeeks = existing.optJSONArray("archived_weeks");
                             JSONObject existingDetails = existing.optJSONObject("week_details");
 
@@ -1119,22 +1116,23 @@ public class MainActivity extends Activity {
                     fos.write(json.getBytes(StandardCharsets.UTF_8));
                 }
             } catch (Exception ignored) {}
-        }
+        }).start();
+    }
 
         @JavascriptInterface
         public String loadArchiveJson() {
             try {
                 File f = new File(getFilesDir(), ARCHIVE_FILENAME);
                 if (!f.exists()) return "";
-                try (FileInputStream fis = new FileInputStream(f)) {
-                    byte[] data = new byte[(int) f.length()];
-                    int read = fis.read(data);
-                    if (read > 0) {
-                        return new String(data, 0, read, StandardCharsets.UTF_8);
-                    }
-                }
+                byte[] data = readFileFully(f);
+                return new String(data, StandardCharsets.UTF_8);
             } catch (Exception ignored) {}
             return "";
+        }
+
+        @JavascriptInterface
+        public void startBackgroundSync() {
+            startBackgroundSyncWithOptions(0, true);
         }
 
         @JavascriptInterface

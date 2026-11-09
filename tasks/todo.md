@@ -2,44 +2,45 @@
 
 ## Status & Phases
 
-### Completed Sprint: GitHub-Powered In-App Over-The-Air (OTA) & Self-Updater (Target: `solotreason/TvC`)
+### Completed Sprint: Codebase Optimization, Dead Code Removal & Efficiency Overhaul
 
-- [x] 1. **OTA Asset Resolution in `MainActivity.java`**:
-  - Implemented prioritized local disk asset lookup in `shouldInterceptRequest()`:
-    - Inspects `getFilesDir()/ota_bundle/{relPath}`.
-    - If present and valid, streams directly from local storage with correct MIME type (`text/html`, `application/javascript`, `text/css`, `image/svg+xml`, `image/png`, etc.).
-    - If absent, seamlessly falls back to APK assets (`getAssets().open("www/{relPath}")`).
-  - Added safety rollback mechanism: if corrupted, `resetOtaToFactory()` clears `ota_bundle/` and reloads factory APK assets.
+- [x] 1. **Phase 1: Clean Up Dead Files & Asset Bloat**:
+  - Deleted dead `package.json` dummy file.
+  - Removed committed Gradle build report (`android/build/reports/problems/problems-report.html`).
+  - Updated `.gitignore` to comprehensively ignore all Gradle build output trees (`android/**/build/`, `android/build/`).
+  - Updated `sync_android_assets()` in `run.py` to strictly filter out `*.zip` archives and purged `ota_bundle.zip` from assets.
+  - Removed obsolete `seed_data.js` cleanup lines in `run.py`.
+  - Result: standalone APK size reduced from **0.41 MB** down to **0.23 MB** (~45% reduction).
 
-- [x] 2. **Native OTA Download & Verification Engine in `MainActivity.java`**:
-  - Implemented `performOtaCheckAndDownload(manual)`:
-    - Fetches `https://raw.githubusercontent.com/solotreason/TvC/main/version.json` with cache-busting timestamp.
-    - Compares remote build timestamp (`remoteBuild > currentBuild`).
-    - Streams `ota_bundle.zip` into `getFilesDir()/ota_temp.zip`.
-    - Unzips safely with Zip-traversal protection into `ota_staging/`.
-    - Validates file structure (`index.html`, `app.js`), then performs atomic replacement of `ota_bundle/`.
-    - Writes `ota_version.json` metadata.
-    - Emits `window.TimecardBridge.onOtaUpdateReady(...)` to notify the dashboard UI.
-  - Exposed JavascriptInterface bridge methods: `checkForUpdates(manual)`, `reloadApp()`, `resetOtaToFactory()`, `getOtaStatusJson()`, `setGitHubRepo(repo)`.
+- [x] 2. **Phase 2: Python Backend Efficiency & Dead Code Cleanup**:
+  - Removed dead module variable `_last_archive_signature` in `backend/database.py`.
+  - Replaced redundant N+1 SQLite queries and repeated `json.dump` disk writes on `GET /api/weeks` with a smart dirty-check that only persists newly introduced archived weeks.
+  - Converted `clear_all_data()` into a single atomic `executescript` transaction.
+  - Cleaned up misplaced `import json` in `backend/app.py`.
+  - Updated `last_synced_at` in `backend/mongo_vault.py` to use standard UTC ISO timestamps.
+  - Removed redundant cookie deletions prior to `shutil.rmtree` in `backend/scraper.py`.
 
-- [x] 3. **Frontend In-App Update Interface (`static/app.js`, `static/index.html`, `static/android_bridge.js`)**:
-  - Added top gradient notification banner (`#otaUpdateBanner`) with **"Reload to Apply"** and dismiss buttons.
-  - Added discrete **"Check for Updates"** button and live build badges in the app footer.
-  - Created modal dialog (`#otaModal`) showing installed version, build timestamp, configured GitHub repo (`solotreason/TvC`), manual update trigger, and factory rollback option.
-  - Added bridge and fetch routes (`/api/ota/status`, `/api/ota/check`, `/api/ota/reload`, `/api/ota/rollback`).
+- [x] 3. **Phase 3: Frontend JavaScript & CSS Optimization**:
+  - Removed dead statement invocations of `isWaitingForDailyTimecard()` in `static/app.js`.
+  - Removed non-existent element fallback `#syncMessage`.
+  - Removed destructive desktop web `localStorage.clear()` on page load so browser users maintain persistent preferences.
+  - Consolidated triple loop in `renderShiftsTable` (`static/app.js`) into a single pass computing rows, totals, and mobile cards simultaneously.
+  - Fixed missing stream `networkRes.clone()` in `static/sw.js` and bypassed dynamic status endpoints (`/api/status`, `/api/auth/`, `/api/ota/`, `/api/sync`) from cache staleness.
+  - Removed dead `.app-header` CSS rule in `static/styles.css`.
 
-- [x] 4. **Release Automation Tooling (`run.py` & `version.json`)**:
-  - Created `version.json` configuring version, build number, release notes, and GitHub paths for `solotreason/TvC`.
-  - Added `python run.py --pack-ota [--ver <version>] [--notes <notes>]`:
-    - Automatically updates `version.json` with a sequential build number.
-    - Packs `static/` files into `static/ota_bundle.zip`.
-    - Syncs web assets to `android/app/src/main/assets/www/`.
+- [x] 4. **Phase 4: Android Java (`MainActivity.java`) Optimizations**:
+  - Replaced chunked UTF-8 string decoding in OTA downloader with `ByteArrayOutputStream` to prevent multi-byte character split corruption.
+  - Replaced fragile partial buffer reads across `getPortalBaseUrl()`, `loadStateJson()`, `loadArchiveJson()`, and `saveArchiveJson()` with a dedicated `readFileFully()` helper.
+  - Offloaded multi-megabyte JSON parsing and disk writes in `saveArchiveJson()` to a background worker thread.
+  - Updated `Notification.Builder` to channel-aware constructor and removed obsolete `setDatabaseEnabled(true)`.
+  - Added `startBackgroundSync()` bridge alias.
 
-- [x] 5. **Testing & Verification**:
-  - Verified `python run.py --pack-ota` generates clean zip bundle and JSON.
-  - Recompiled standalone APK (`Timecard-Tracker.apk`) with 0 errors.
-  - Ran all 19 automated unit tests with 100% pass rate.
+- [x] 5. **Phase 5: Rebuild & Full Verification**:
+  - Repacked OTA bundle with `python run.py --pack-ota` without asset duplication.
+  - Recompiled standalone APK (`Timecard-Tracker.apk`) in 799ms (size: 0.23 MB).
+  - All 19 automated unit tests passing (100% pass rate).
 
 ## Review Summary
-- **No APK Reinstalls Needed**: Pushing an update to `https://github.com/solotreason/TvC` allows all installed Android devices to update HTML, CSS, JavaScript, and scraper logic in the background over-the-air.
-- **Fail-Safe Operation**: If an update cannot be reached, the app continues running offline. If an update is ever corrupted, users can tap "Revert to Factory APK Bundle" in Settings to instantly restore the factory APK state.
+- **App Size & Memory**: Cut APK size nearly in half (0.41 MB -> 0.23 MB).
+- **Disk I/O & CPU**: Eliminated disk thrashing on every `GET /api/weeks` read call; shifted archive saving off the UI thread.
+- **Reliability & Code Quality**: Fixed UTF-8 chunk decoding, removed dead/obsolete files, and verified 100% backward compatibility.

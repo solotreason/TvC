@@ -14,7 +14,6 @@ DB_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "timecard.db")
 )
 ARCHIVE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "archive", "timecard_archive.json")
-_last_archive_signature: Optional[tuple] = None
 
 
 def get_connection() -> sqlite3.Connection:
@@ -445,11 +444,13 @@ def get_active_and_archived_weeks(limit: int = ACTIVE_WEEK_LIMIT) -> Dict[str, L
 
     sorted_archived = sorted(merged_archived_map.values(), key=lambda x: x["week_end_date"], reverse=True)
 
-    if sorted_archived and "test_timecard.db" not in DB_FILE:
+    # Persist newly archived weeks without thrashing disk or re-querying on every read
+    saved_details = saved_archive.get("week_details", {})
+    new_archived_weeks = [w for w in current_archived if w["week_end_date"] not in saved_details]
+    if new_archived_weeks and "test_timecard.db" not in DB_FILE:
         try:
             os.makedirs(os.path.dirname(ARCHIVE_FILE), exist_ok=True)
-            saved_details = saved_archive.get("week_details", {})
-            for w in sorted_archived:
+            for w in new_archived_weeks:
                 wed = w["week_end_date"]
                 det = get_week_details(wed)
                 if det:
@@ -671,9 +672,14 @@ def clear_all_data():
     """Clears all active session timecard, time-off, and profile records, but preserves the permanent archive vault."""
     conn = get_connection()
     with conn:
-        for table in [
-            "weeks", "shifts", "shift_details", "shift_audit_log",
-            "corrections", "entitlements", "employee_profile", "sync_logs"
-        ]:
-            conn.execute(f"DELETE FROM {table}")
+        conn.executescript("""
+            DELETE FROM weeks;
+            DELETE FROM shifts;
+            DELETE FROM shift_details;
+            DELETE FROM shift_audit_log;
+            DELETE FROM corrections;
+            DELETE FROM entitlements;
+            DELETE FROM employee_profile;
+            DELETE FROM sync_logs;
+        """)
     conn.close()

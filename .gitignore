@@ -17,9 +17,11 @@ __pycache__/
 .pytest_cache/
 
 # Android Build Outputs
-android/app/build/
+android/build/
+android/**/build/
 android/.gradle/
 android/local.properties
+android/app/src/main/assets/www/*.zip
 *.apk
 
 # OS / Editor

@@ -73,7 +73,12 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 2. API requests -> Network-first with Cache fallback for seamless offline viewing
+  // 2. Dynamic status/auth/sync endpoints: Network-only (never stale-cache status)
+  if (url.pathname.startsWith('/api/status') || url.pathname.startsWith('/api/auth/') || url.pathname.startsWith('/api/ota/') || url.pathname.startsWith('/api/sync')) {
+    return;
+  }
+
+  // 3. API data endpoints (weeks, details, archive) -> Network-first with Cache fallback for offline viewing
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
       fetch(req)
@@ -97,14 +102,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 3. Static assets (CSS, JS, Fonts, Images) -> Cache-first with network fallback
+  // 4. Static assets (CSS, JS, Fonts, Images) -> Cache-first with network fallback
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) {
         // Fetch in background to update cache for next time (Stale-While-Revalidate)
         fetch(req).then((networkRes) => {
           if (networkRes && networkRes.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, networkRes));
+            const clone = networkRes.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
           }
         }).catch(() => {});
         return cached;

@@ -20,12 +20,6 @@ body {
   background-color: #f4f5f7;
 }
 
-/* Header & Banner */
-.app-header {
-  background-color: #ffffff;
-  border-bottom: 2px solid #e9ecef;
-}
-
 .btn-primary {
   background-color: var(--brand-accent);
   color: var(--brand-primary);

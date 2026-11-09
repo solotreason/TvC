@@ -107,24 +107,6 @@ def logout_portal_session() -> Dict[str, Any]:
     Logs out of the portal session by clearing Chromium cookies in .portal_session
     and removing session storage files.
     """
-    cookie_paths = [
-        os.path.join(SESSION_DIR, "Default", "Network", "Cookies"),
-        os.path.join(SESSION_DIR, "Default", "Cookies")
-    ]
-    for cpath in cookie_paths:
-        if os.path.exists(cpath):
-            try:
-                conn = sqlite3.connect(cpath, timeout=2.0)
-                with conn:
-                    conn.execute("DELETE FROM cookies")
-                conn.close()
-            except Exception:
-                pass
-            try:
-                os.remove(cpath)
-            except Exception:
-                pass
-
     if os.path.exists(SESSION_DIR):
         try:
             shutil.rmtree(SESSION_DIR, ignore_errors=True)

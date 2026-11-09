@@ -11,3 +11,7 @@
   1. Always verify the downloaded bundle in an isolated staging directory (`ota_staging`) with canonical path checks to prevent zip-slip vulnerabilities before atomically swapping it into the active bundle directory.
   2. Always provide a seamless fallback to the APK's read-only bundled assets (`getAssets().open(...)`) if any file is missing, unreadable, or corrupted.
   3. Provide a user-accessible "Revert to Factory" mechanism so corrupted or breaking client-side updates can be rolled back instantly without an APK reinstall.
+
+### 3. Read Endpoint Purity & Disk I/O Bottlenecks
+- **Pattern**: Never perform disk writes (`json.dump`) or repetitive N+1 database queries inside read handlers (e.g. `GET /api/weeks`). Keep read paths pure and cached; restrict disk writes to write/sync mutations only.
+- **Buffer Safety**: In Java/Android, never assume `InputStream.read(byte[])` reads an entire file in a single invocation, and never convert chunked byte buffers to UTF-8 strings mid-stream (which splits multi-byte code points). Always read completely into a `ByteArrayOutputStream` or use character stream readers.

@@ -60,21 +60,23 @@ def seed_sample():
 
 
 def sync_android_assets():
-    """Copies static/ web assets into android/app/src/main/assets/www/."""
+    """Copies static/ web assets into android/app/src/main/assets/www/ (excluding .zip archives)."""
     root_dir = os.path.dirname(os.path.abspath(__file__))
     static_dir = os.path.join(root_dir, "static")
     assets_www = os.path.join(root_dir, "android", "app", "src", "main", "assets", "www")
     os.makedirs(assets_www, exist_ok=True)
 
-    # Remove legacy unused seed_data.js if present
-    for stale in [os.path.join(static_dir, "seed_data.js"), os.path.join(assets_www, "seed_data.js")]:
-        if os.path.exists(stale):
+    # Clean any stale archives from asset directory
+    for existing in os.listdir(assets_www):
+        if existing.endswith(".zip"):
             try:
-                os.remove(stale)
+                os.remove(os.path.join(assets_www, existing))
             except Exception:
                 pass
 
     for fname in os.listdir(static_dir):
+        if fname.endswith(".zip"):
+            continue
         src = os.path.join(static_dir, fname)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(assets_www, fname))

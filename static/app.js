@@ -461,7 +461,6 @@ async function loadWeekDetails(weekEndDate, forceRefresh = false) {
     weekDetailsCache.set(weekEndDate, data);
     currentWeekData = data;
     renderWeek(data);
-    isWaitingForDailyTimecard();
   } catch (err) {
     console.error('Failed to load week details:', err);
   }
@@ -645,66 +644,67 @@ function renderShiftsTable(shifts) {
           </div>
         `;
       } else {
-        const rowsHtml = details.map(d => `
-          <tr class="hover:bg-[#f8f9fa]">
-            <td>${d.trans_type || 'Timecard'}</td>
-            <td>${d.op_type || 'STD'}</td>
-            <td>${d.center || ''}</td>
-            <td>${d.sort || ''}</td>
-            <td class="font-semibold text-[#1e293b]">${d.activity || 'SHIFT ACTIVITY'}</td>
-            <td class="text-right font-mono">${formatDecimal(d.rate)}</td>
-            <td class="text-right font-mono">${formatDecimal(d.st_hrs)}</td>
-            <td class="text-right font-mono">${formatDecimal(d.st_amt)}</td>
-            <td class="text-right font-mono">${formatDecimal(d.ot_hrs)}</td>
-            <td class="text-right font-mono">${formatDecimal(d.ot_amt)}</td>
-            <td class="text-right font-mono">${formatDecimal(d.dt_hrs)}</td>
-            <td class="text-right font-mono">${formatDecimal(d.dt_amt)}</td>
-            <td class="text-right font-mono">${formatDecimal(d.flat_amt)}</td>
-          </tr>
-        `).join('');
-
+        let rowsHtml = '';
+        let mobileCardsHtml = '';
         let totStHrs = 0, totStAmt = 0, totOtHrs = 0, totOtAmt = 0, totDtHrs = 0, totDtAmt = 0, totFlatAmt = 0;
-        for (const cur of details) {
-          totStHrs += cur.st_hrs || 0;
-          totStAmt += cur.st_amt || 0;
-          totOtHrs += cur.ot_hrs || 0;
-          totOtAmt += cur.ot_amt || 0;
-          totDtHrs += cur.dt_hrs || 0;
-          totDtAmt += cur.dt_amt || 0;
-          totFlatAmt += cur.flat_amt || 0;
-        }
 
-        // Mobile-optimized segment cards (no horizontal scroll needed on phones)
-        const mobileCardsHtml = details.map(d => `
-          <div class="p-2.5 rounded border border-[#dee2e6] bg-white space-y-1.5 text-xs">
-            <div class="flex items-center justify-between border-b border-[#f1f3f5] pb-1">
-              <span class="font-bold text-[#1e293b]">${d.activity || 'SHIFT ACTIVITY'}</span>
-              <span class="font-mono text-[11px] font-semibold text-[#495057]">$${formatDecimal(d.rate)}/hr</span>
-            </div>
-            <div class="text-[10px] text-[#6c757d] flex items-center gap-2">
-              <span>${d.trans_type || 'Timecard'}</span>
-              <span>•</span>
-              <span>${d.op_type || 'STD'} ${d.center ? `#${d.center}` : ''}</span>
-            </div>
-            <div class="grid grid-cols-3 gap-1.5 pt-0.5 text-[11px]">
-              <div class="bg-[#f8f9fa] px-2 py-1 rounded">
-                <span class="text-[#6c757d] block text-[10px]">ST</span>
-                <span class="font-mono font-bold">${formatDecimal(d.st_hrs)}h</span>
-                <span class="font-mono text-[10px] text-[#495057] block">$${formatDecimal(d.st_amt)}</span>
+        for (let i = 0; i < details.length; i++) {
+          const d = details[i];
+          totStHrs += d.st_hrs || 0;
+          totStAmt += d.st_amt || 0;
+          totOtHrs += d.ot_hrs || 0;
+          totOtAmt += d.ot_amt || 0;
+          totDtHrs += d.dt_hrs || 0;
+          totDtAmt += d.dt_amt || 0;
+          totFlatAmt += d.flat_amt || 0;
+
+          rowsHtml += `
+            <tr class="hover:bg-[#f8f9fa]">
+              <td>${d.trans_type || 'Timecard'}</td>
+              <td>${d.op_type || 'STD'}</td>
+              <td>${d.center || ''}</td>
+              <td>${d.sort || ''}</td>
+              <td class="font-semibold text-[#1e293b]">${d.activity || 'SHIFT ACTIVITY'}</td>
+              <td class="text-right font-mono">${formatDecimal(d.rate)}</td>
+              <td class="text-right font-mono">${formatDecimal(d.st_hrs)}</td>
+              <td class="text-right font-mono">${formatDecimal(d.st_amt)}</td>
+              <td class="text-right font-mono">${formatDecimal(d.ot_hrs)}</td>
+              <td class="text-right font-mono">${formatDecimal(d.ot_amt)}</td>
+              <td class="text-right font-mono">${formatDecimal(d.dt_hrs)}</td>
+              <td class="text-right font-mono">${formatDecimal(d.dt_amt)}</td>
+              <td class="text-right font-mono">${formatDecimal(d.flat_amt)}</td>
+            </tr>`;
+
+          mobileCardsHtml += `
+            <div class="p-2.5 rounded border border-[#dee2e6] bg-white space-y-1.5 text-xs">
+              <div class="flex items-center justify-between border-b border-[#f1f3f5] pb-1">
+                <span class="font-bold text-[#1e293b]">${d.activity || 'SHIFT ACTIVITY'}</span>
+                <span class="font-mono text-[11px] font-semibold text-[#495057]">$${formatDecimal(d.rate)}/hr</span>
               </div>
-              <div class="bg-[#f8f9fa] px-2 py-1 rounded">
-                <span class="text-[#6c757d] block text-[10px]">OT</span>
-                <span class="font-mono font-bold text-[#b02a37]">${formatDecimal(d.ot_hrs)}h</span>
-                <span class="font-mono text-[10px] text-[#b02a37] block">$${formatDecimal(d.ot_amt)}</span>
+              <div class="text-[10px] text-[#6c757d] flex items-center gap-2">
+                <span>${d.trans_type || 'Timecard'}</span>
+                <span>•</span>
+                <span>${d.op_type || 'STD'} ${d.center ? `#${d.center}` : ''}</span>
               </div>
-              <div class="bg-[#f8f9fa] px-2 py-1 rounded">
-                <span class="text-[#6c757d] block text-[10px]">DT</span>
-                <span class="font-mono font-bold">${formatDecimal(d.dt_hrs)}h</span>
-                <span class="font-mono text-[10px] text-[#495057] block">$${formatDecimal(d.dt_amt)}</span>
+              <div class="grid grid-cols-3 gap-1.5 pt-0.5 text-[11px]">
+                <div class="bg-[#f8f9fa] px-2 py-1 rounded">
+                  <span class="text-[#6c757d] block text-[10px]">ST</span>
+                  <span class="font-mono font-bold">${formatDecimal(d.st_hrs)}h</span>
+                  <span class="font-mono text-[10px] text-[#495057] block">$${formatDecimal(d.st_amt)}</span>
+                </div>
+                <div class="bg-[#f8f9fa] px-2 py-1 rounded">
+                  <span class="text-[#6c757d] block text-[10px]">OT</span>
+                  <span class="font-mono font-bold text-[#b02a37]">${formatDecimal(d.ot_hrs)}h</span>
+                  <span class="font-mono text-[10px] text-[#b02a37] block">$${formatDecimal(d.ot_amt)}</span>
+                </div>
+                <div class="bg-[#f8f9fa] px-2 py-1 rounded">
+                  <span class="text-[#6c757d] block text-[10px]">DT</span>
+                  <span class="font-mono font-bold">${formatDecimal(d.dt_hrs)}h</span>
+                  <span class="font-mono text-[10px] text-[#495057] block">$${formatDecimal(d.dt_amt)}</span>
+                </div>
               </div>
-            </div>
-          </div>
-        `).join('');
+            </div>`;
+        }
 
         // Punch modifications notice if this shift was altered
         let punchModNotice = '';
@@ -996,7 +996,6 @@ async function checkAuthStatus() {
         syncBtn.classList.remove('hidden');
         syncBtn.classList.add('flex');
       }
-      isWaitingForDailyTimecard();
     } else {
       if (authDot) authDot.className = 'w-2 h-2 rounded-full bg-[#198754] animate-pulse';
       if (authLabel) authLabel.textContent = 'Log In';
@@ -1008,7 +1007,6 @@ async function checkAuthStatus() {
         syncBtn.classList.add('hidden');
         syncBtn.classList.remove('flex');
       }
-      isWaitingForDailyTimecard();
     }
   } catch (err) {
     console.error('Failed to check auth status:', err);
@@ -1024,7 +1022,7 @@ async function checkAuthStatus() {
 async function startLoginFlow() {
   const banner = document.getElementById('statusBanner');
   const stageTitle = document.getElementById('syncStageTitle');
-  const statusMsg = document.getElementById('syncMessage') || document.getElementById('statusMessage');
+  const statusMsg = document.getElementById('statusMessage');
   const progressBar = document.getElementById('syncProgressBar');
   const percentBadge = document.getElementById('syncPercentBadge');
   const syncBtn = document.getElementById('syncBtn');
@@ -1435,9 +1433,6 @@ function setupPullToRefresh() {
 
 // Initialization on DOMContentLoaded
 document.addEventListener('DOMContentLoaded', async () => {
-  if (typeof window.AndroidNative === 'undefined') {
-    try { localStorage.clear(); } catch (e) { }
-  }
   setupTabs();
   setupPullToRefresh();
   setupSmartAutoCheck();

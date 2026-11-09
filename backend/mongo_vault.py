@@ -5,6 +5,7 @@ ensuring past months and years are permanently preserved across phone switches (
 """
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 _client = None
@@ -157,7 +158,7 @@ def sync_cloud_archive(
                     "week_details": merged_details,
                     "audit_logs": merged_audits,
                     "corrections": merged_corrs,
-                    "last_synced_at": os.environ.get("PYTEST_CURRENT_TEST", "web_app")
+                    "last_synced_at": datetime.now(timezone.utc).isoformat()
                 }
             },
             upsert=True

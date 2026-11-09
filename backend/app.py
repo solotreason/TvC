@@ -3,6 +3,7 @@ FastAPI application for Timecard Tracker & Time Off Auditor.
 Provides REST endpoints and serves the modern dashboard frontend.
 """
 import os
+import json
 import threading
 from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -16,7 +17,6 @@ from .database import (
     clear_all_data, load_archive_vault, ARCHIVE_FILE
 )
 from .mongo_vault import sync_cloud_archive, fetch_cloud_archive
-import json
 from .scraper import run_timecard_sync, check_auth_status, launch_login_flow, logout_portal_session
 
 app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.0")

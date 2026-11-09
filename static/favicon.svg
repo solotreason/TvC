@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#f59e0b" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Squircle Base -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bgGrad)" stroke="#334155" stroke-width="2.5"/>
+  <rect x="4" y="4" width="120" height="6" rx="3" fill="#f59e0b"/>
+
+  <!-- Dial Gauge Ring -->
+  <circle cx="64" cy="67" r="44" fill="none" stroke="#334155" stroke-width="3" stroke-dasharray="3 4"/>
+  <circle cx="64" cy="67" r="44" fill="none" stroke="url(#goldGrad)" stroke-width="3.5" stroke-dasharray="80 200" stroke-linecap="round"/>
+
+  <!-- Clock Punch Ticks -->
+  <circle cx="64" cy="28" r="2.5" fill="#f59e0b"/>
+  <circle cx="103" cy="67" r="2.5" fill="#94a3b8"/>
+  <circle cx="64" cy="106" r="2.5" fill="#94a3b8"/>
+  <circle cx="25" cy="67" r="2.5" fill="#f59e0b"/>
+
+  <!-- Center Clock Hands (Pointing at 9:00 punch start) -->
+  <line x1="64" y1="67" x2="64" y2="44" stroke="#f8fafc" stroke-width="3" stroke-linecap="round"/>
+  <line x1="64" y1="67" x2="43" y2="67" stroke="#f59e0b" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="64" cy="67" r="4" fill="#f59e0b"/>
+
+  <!-- Stylized TvC Monogram Plaque -->
+  <g filter="url(#glow)">
+    <!-- 'T' -->
+    <path d="M38 84 L52 84 M45 84 L45 99" stroke="#fbbf24" stroke-width="3.5" stroke-linecap="round"/>
+    <!-- 'v' -->
+    <path d="M57 88 L64 99 L71 88" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- 'C' -->
+    <path d="M89 87 C83 83, 76 89, 76 94 C76 99, 83 104, 89 100" fill="none" stroke="#fbbf24" stroke-width="3.5" stroke-linecap="round"/>
+  </g>
+</svg>

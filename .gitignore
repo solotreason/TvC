@@ -1,0 +1,30 @@
+# Credentials & Secrets
+.env
+.env.*
+
+# Local Runtime & Database Storage
+timecard.db
+timecard.db-shm
+timecard.db-wal
+test_timecard.db
+archive/
+.portal_session/
+portal_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Android Build Outputs
+android/app/build/
+android/.gradle/
+android/local.properties
+*.apk
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

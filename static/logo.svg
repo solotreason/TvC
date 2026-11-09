@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 80" width="360" height="80">
+  <defs>
+    <linearGradient id="logoBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="logoGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Left Icon Emblem (64x64 centered at x=8, y=8) -->
+  <g transform="translate(8, 8)">
+    <rect x="0" y="0" width="64" height="64" rx="16" fill="url(#logoBg)" stroke="#334155" stroke-width="1.5"/>
+    <rect x="0" y="0" width="64" height="4" rx="2" fill="#f59e0b"/>
+    <circle cx="32" cy="34" r="22" fill="none" stroke="#334155" stroke-width="2" stroke-dasharray="2 3"/>
+    <circle cx="32" cy="34" r="22" fill="none" stroke="url(#logoGold)" stroke-width="2.5" stroke-dasharray="45 100" stroke-linecap="round"/>
+    <line x1="32" y1="34" x2="32" y2="20" stroke="#f8fafc" stroke-width="2.2" stroke-linecap="round"/>
+    <line x1="32" y1="34" x2="20" y2="34" stroke="#f59e0b" stroke-width="2.2" stroke-linecap="round"/>
+    <circle cx="32" cy="34" r="3" fill="#f59e0b"/>
+  </g>
+
+  <!-- Brand Typography -->
+  <text x="88" y="42" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="28" font-weight="900" fill="#1e293b" letter-spacing="-0.5">
+    TvC
+  </text>
+  <text x="145" y="42" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="21" font-weight="700" fill="#f59e0b">
+    • Timecard Viewer
+  </text>
+  <text x="89" y="59" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#64748b" letter-spacing="0.2">
+    Personal Shift &amp; Leave Auditor • v2.4.0
+  </text>
+</svg>

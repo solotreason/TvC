@@ -1,0 +1,1258 @@
+package com.timecard.tracker;
+
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+public class MainActivity extends Activity {
+
+    private static final String APP_HOST = "appassets.local";
+    private static final String NOTIFICATION_CHANNEL_ID = "daily_timecard_channel";
+    private static final String STORE_FILENAME = "timecard_store_v4.json";
+    private static final String ARCHIVE_FILENAME = "timecard_archive_v1.json";
+    private static final String AUTH_MARKER_FILENAME = "portal_auth_v4.flag";
+    private static final String EXTRA_WEEK_END_DATE = "EXTRA_WEEK_END_DATE";
+    private static final String EXTRA_SHIFT_DATE = "EXTRA_SHIFT_DATE";
+    private static final String PORTAL_CFG_FILENAME = "portal_config.json";
+    private static final String DEFAULT_TIMECARD_PATH = "/us/en/tools-and-resources/pay-and-benefits/time-card-viewer.html";
+    private static final String DEFAULT_TIMEOFF_PATH = "/us/en/tools-and-resources/pay-and-benefits/time-off-viewer.html";
+
+    // GitHub Over-The-Air (OTA) Live Update Configuration
+    private static final String DEFAULT_GITHUB_REPO = "solotreason/TvC";
+    private static final String OTA_DIR_NAME = "ota_bundle";
+    private static final String OTA_VERSION_FILENAME = "ota_version.json";
+    private static final String PREFS_NAME = "tvc_prefs";
+    private static final String PREF_KEY_GITHUB_REPO = "github_repo";
+    private static final long APP_BASE_BUILD = 2026110801L;
+    private static final String APP_BASE_VERSION = "2.4.1";
+
+    private WebView dashboardWebView;
+    private WebView scraperWebView;
+    private LinearLayout loginOverlayContainer;
+    private TextView loginOverlayTitle;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    private boolean isSyncRunning = false;
+    private int requestedMaxWeeks = 0; // 0 = all 8+ weeks, 1 = current week only
+    private boolean requestedSyncTimeoff = true;
+    private final List<String> pendingWeeksQueue = new ArrayList<>();
+    private int totalWeeksToSync = 0;
+    private int weeksSyncedCount = 0;
+
+    private String getPortalBaseUrl() {
+        try {
+            File f = new File(getFilesDir(), PORTAL_CFG_FILENAME);
+            if (f.exists()) {
+                try (FileInputStream fis = new FileInputStream(f)) {
+                    byte[] data = new byte[(int) f.length()];
+                    int read = fis.read(data);
+                    if (read > 0) {
+                        JSONObject obj = new JSONObject(new String(data, 0, read, StandardCharsets.UTF_8));
+                        String base = obj.optString("base_url", "");
+                        if (!base.isEmpty()) return base;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return new String(
+                android.util.Base64.decode("aHR0cHM6Ly93d3cudXBzZXJzLmNvbQ==", android.util.Base64.DEFAULT),
+                StandardCharsets.UTF_8
+        );
+    }
+
+    private String getTimecardPortalUrl() {
+        return getPortalBaseUrl() + DEFAULT_TIMECARD_PATH;
+    }
+
+    private String getTimeoffPortalUrl() {
+        return getPortalBaseUrl() + DEFAULT_TIMEOFF_PATH;
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        Window window = getWindow();
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setStatusBarColor(Color.parseColor("#1E293B"));
+
+        FrameLayout rootLayout = new FrameLayout(this);
+        rootLayout.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        // 1. Primary Dashboard WebView
+        dashboardWebView = new WebView(this);
+        setupWebViewDefaults(dashboardWebView);
+        dashboardWebView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+        dashboardWebView.addJavascriptInterface(new AndroidNativeBridge(), "AndroidNative");
+        dashboardWebView.setWebChromeClient(new WebChromeClient());
+        dashboardWebView.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (uri != null && APP_HOST.equalsIgnoreCase(uri.getHost())) {
+                    String path = uri.getPath();
+                    if (path == null || path.equals("/") || path.isEmpty()) {
+                        path = "/index.html";
+                    }
+                    if (path.startsWith("/static/")) {
+                        path = path.substring("/static".length());
+                    }
+                    String relPath = path.startsWith("/") ? path.substring(1) : path;
+
+                    // 1. Check for OTA override on local device storage
+                    try {
+                        File otaDir = new File(getFilesDir(), OTA_DIR_NAME);
+                        File otaFile = new File(otaDir, relPath);
+                        if (otaFile.exists() && otaFile.isFile() && otaFile.length() > 0) {
+                            String mime = getMimeType(relPath);
+                            return new WebResourceResponse(mime, "UTF-8", new FileInputStream(otaFile));
+                        }
+                    } catch (Exception ignored) {}
+
+                    // 2. Fallback to APK bundled assets
+                    String assetPath = "www/" + relPath;
+                    try {
+                        InputStream is = getAssets().open(assetPath);
+                        String mime = getMimeType(assetPath);
+                        return new WebResourceResponse(mime, "UTF-8", is);
+                    } catch (Exception e) {
+                        return null;
+                    }
+                }
+                return super.shouldInterceptRequest(view, request);
+            }
+        });
+
+        rootLayout.addView(dashboardWebView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        // 2. Background Scraper + Slide-Up Login Sheet Container
+        loginOverlayContainer = new LinearLayout(this);
+        loginOverlayContainer.setOrientation(LinearLayout.VERTICAL);
+        loginOverlayContainer.setBackgroundColor(Color.WHITE);
+        loginOverlayContainer.setVisibility(View.GONE);
+
+        // Top Bar inside Login Sheet
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setBackgroundColor(Color.parseColor("#1E293B"));
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        int padH = dpToPx(14);
+        int padV = dpToPx(10);
+        topBar.setPadding(padH, padV, padH, padV);
+
+        loginOverlayTitle = new TextView(this);
+        loginOverlayTitle.setText("Portal Sign-In (Auto-closes after 2FA)");
+        loginOverlayTitle.setTextColor(Color.parseColor("#F59E0B"));
+        loginOverlayTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        loginOverlayTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f
+        );
+        topBar.addView(loginOverlayTitle, titleParams);
+
+        Button closeBtn = new Button(this);
+        closeBtn.setText("Hide / Run in Background");
+        closeBtn.setAllCaps(false);
+        closeBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        closeBtn.setTextColor(Color.parseColor("#1E293B"));
+        closeBtn.setBackgroundColor(Color.parseColor("#F59E0B"));
+        closeBtn.setPadding(dpToPx(10), dpToPx(4), dpToPx(10), dpToPx(4));
+        closeBtn.setOnClickListener(v -> loginOverlayContainer.setVisibility(View.GONE));
+        topBar.addView(closeBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        loginOverlayContainer.addView(topBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        // Scraper WebView
+        scraperWebView = new WebView(this);
+        setupWebViewDefaults(scraperWebView);
+
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        cookieManager.setAcceptThirdPartyCookies(scraperWebView, true);
+
+        scraperWebView.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                // Resource blocking during background sync (aborts images, fonts, and telemetry)
+                if (loginOverlayContainer.getVisibility() != View.VISIBLE && request != null && request.getUrl() != null) {
+                    String url = request.getUrl().toString().toLowerCase();
+                    if (url.endsWith(".png") || url.endsWith(".jpg") || url.endsWith(".jpeg")
+                            || url.endsWith(".gif") || url.endsWith(".woff2") || url.endsWith(".woff")
+                            || url.endsWith(".ttf") || url.contains("tealium") || url.contains("adroll")
+                            || url.contains("doubleclick") || url.contains("google-analytics")
+                            || url.contains("demdex") || url.contains("hotjar") || url.contains("optimizely")) {
+                        return new WebResourceResponse(
+                                "text/plain",
+                                "UTF-8",
+                                new ByteArrayInputStream(new byte[0])
+                        );
+                    }
+                }
+                return super.shouldInterceptRequest(view, request);
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                CookieManager.getInstance().flush();
+                injectMicrosoftSecurityBypass(view);
+            }
+        });
+
+        loginOverlayContainer.addView(scraperWebView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1.0f
+        ));
+
+        rootLayout.addView(loginOverlayContainer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        setContentView(rootLayout);
+
+        // Load main application UI
+        setupNotificationChannel();
+        dashboardWebView.loadUrl("https://" + APP_HOST + "/index.html");
+        mainHandler.postDelayed(() -> handleNotificationIntent(getIntent()), 900);
+        mainHandler.postDelayed(() -> performOtaCheckAndDownload(false), 3500);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleNotificationIntent(intent);
+    }
+
+    private void handleNotificationIntent(Intent intent) {
+        if (intent == null || dashboardWebView == null) return;
+        final String weekEndDate = intent.getStringExtra(EXTRA_WEEK_END_DATE);
+        final String shiftDate = intent.getStringExtra(EXTRA_SHIFT_DATE);
+        if ((weekEndDate != null && !weekEndDate.isEmpty()) || (shiftDate != null && !shiftDate.isEmpty())) {
+            intent.removeExtra(EXTRA_WEEK_END_DATE);
+            intent.removeExtra(EXTRA_SHIFT_DATE);
+            final String jsCall = String.format(
+                    "if(window.focusShiftFromNotification){window.focusShiftFromNotification(%s,%s);}",
+                    JSONObject.quote(weekEndDate != null ? weekEndDate : ""),
+                    JSONObject.quote(shiftDate != null ? shiftDate : "")
+            );
+            mainHandler.postDelayed(() -> dashboardWebView.evaluateJavascript(jsCall, null), 250);
+        }
+    }
+
+    private void setupNotificationChannel() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    NotificationChannel channel = new NotificationChannel(
+                            NOTIFICATION_CHANNEL_ID,
+                            "Daily Timecard Alerts",
+                            NotificationManager.IMPORTANCE_HIGH
+                    );
+                    channel.setDescription("Notifications whenever a new daily timecard is posted");
+                    nm.createNotificationChannel(channel);
+                }
+            }
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1001);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void postNativeNotification(String title, String body, String weekEndDate, String shiftDate) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return;
+
+            int notifId = (int) (System.currentTimeMillis() & 0x7fffffff);
+
+            Intent intent = new Intent(this, MainActivity.class);
+            intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            if (weekEndDate != null && !weekEndDate.isEmpty()) {
+                intent.putExtra(EXTRA_WEEK_END_DATE, weekEndDate);
+            }
+            if (shiftDate != null && !shiftDate.isEmpty()) {
+                intent.putExtra(EXTRA_SHIFT_DATE, shiftDate);
+            }
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent pendingIntent = PendingIntent.getActivity(this, notifId, intent, flags);
+
+            Notification.Builder builder = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    ? new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+                    : new Notification.Builder(this);
+
+            builder.setSmallIcon(R.drawable.ic_launcher)
+                    .setContentTitle(title != null ? title : "New Timecard Added")
+                    .setContentText(body != null ? body : "A new daily timecard has been posted.")
+                    .setStyle(new Notification.BigTextStyle().bigText(body))
+                    .setAutoCancel(true)
+                    .setContentIntent(pendingIntent);
+
+            nm.notify(notifId, builder.build());
+        } catch (Exception ignored) {}
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void setupWebViewDefaults(WebView webView) {
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setUserAgentString(
+                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        );
+    }
+
+    private String getMimeType(String path) {
+        if (path.endsWith(".html")) return "text/html";
+        if (path.endsWith(".css")) return "text/css";
+        if (path.endsWith(".js")) return "application/javascript";
+        if (path.endsWith(".json")) return "application/json";
+        if (path.endsWith(".svg")) return "image/svg+xml";
+        if (path.endsWith(".png")) return "image/png";
+        if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+        if (path.endsWith(".ico")) return "image/x-icon";
+        return "text/plain";
+    }
+
+    private String getActiveGitHubRepo() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        return prefs.getString(PREF_KEY_GITHUB_REPO, DEFAULT_GITHUB_REPO);
+    }
+
+    private JSONObject getCurrentOtaInfo() {
+        try {
+            File f = new File(getFilesDir(), OTA_VERSION_FILENAME);
+            if (f.exists()) {
+                try (FileInputStream fis = new FileInputStream(f)) {
+                    byte[] b = new byte[(int) f.length()];
+                    int read = fis.read(b);
+                    if (read > 0) {
+                        return new JSONObject(new String(b, StandardCharsets.UTF_8));
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        JSONObject def = new JSONObject();
+        try {
+            def.put("version", APP_BASE_VERSION);
+            def.put("build", APP_BASE_BUILD);
+            def.put("is_factory", true);
+            def.put("github_repo", getActiveGitHubRepo());
+        } catch (Exception ignored) {}
+        return def;
+    }
+
+    private void saveOtaVersionInfo(JSONObject info) {
+        try {
+            File f = new File(getFilesDir(), OTA_VERSION_FILENAME);
+            try (FileOutputStream fos = new FileOutputStream(f, false)) {
+                fos.write(info.toString(2).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static void deleteDirRecursively(File dir) {
+        if (dir == null || !dir.exists()) return;
+        File[] children = dir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deleteDirRecursively(child);
+            }
+        }
+        dir.delete();
+    }
+
+    private static void unzipBundle(File zipFile, File targetDir) throws IOException {
+        if (!targetDir.exists()) targetDir.mkdirs();
+        String canonicalTarget = targetDir.getCanonicalPath();
+
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
+            ZipEntry entry;
+            byte[] buffer = new byte[8192];
+            while ((entry = zis.getNextEntry()) != null) {
+                String entryName = entry.getName();
+                if (entryName.startsWith("__MACOSX/") || entryName.endsWith(".DS_Store")) {
+                    zis.closeEntry();
+                    continue;
+                }
+                File dest = new File(targetDir, entryName);
+                String canonicalDest = dest.getCanonicalPath();
+                if (!canonicalDest.startsWith(canonicalTarget + File.separator) && !canonicalDest.equals(canonicalTarget)) {
+                    throw new SecurityException("Zip traversal violation: " + entryName);
+                }
+                if (entry.isDirectory()) {
+                    dest.mkdirs();
+                } else {
+                    File p = dest.getParentFile();
+                    if (p != null && !p.exists()) p.mkdirs();
+                    try (FileOutputStream fos = new FileOutputStream(dest, false)) {
+                        int len;
+                        while ((len = zis.read(buffer)) > 0) {
+                            fos.write(buffer, 0, len);
+                        }
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+    }
+
+    private void performOtaCheckAndDownload(final boolean manual) {
+        new Thread(() -> {
+            try {
+                String repo = getActiveGitHubRepo();
+                String versionUrl = "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + System.currentTimeMillis();
+
+                HttpURLConnection conn = (HttpURLConnection) new URL(versionUrl).openConnection();
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
+
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    if (manual) {
+                        mainHandler.post(() -> Toast.makeText(this, "Could not reach GitHub (HTTP " + code + ")", Toast.LENGTH_SHORT).show());
+                    }
+                    return;
+                }
+
+                String jsonStr;
+                try (InputStream in = conn.getInputStream()) {
+                    byte[] buf = new byte[16384];
+                    int r;
+                    StringBuilder sb = new StringBuilder();
+                    while ((r = in.read(buf)) > 0) {
+                        sb.append(new String(buf, 0, r, StandardCharsets.UTF_8));
+                    }
+                    jsonStr = sb.toString();
+                }
+
+                JSONObject remote = new JSONObject(jsonStr);
+                String remoteVersion = remote.optString("version", APP_BASE_VERSION);
+                long remoteBuild = remote.optLong("build", 0L);
+                String releaseNotes = remote.optString("release_notes", "Performance improvements.");
+                String bundleUrl = remote.optString("ota_bundle_url", "https://raw.githubusercontent.com/" + repo + "/main/static/ota_bundle.zip");
+
+                JSONObject current = getCurrentOtaInfo();
+                long currentBuild = current.optLong("build", APP_BASE_BUILD);
+
+                if (remoteBuild <= currentBuild) {
+                    if (manual) {
+                        mainHandler.post(() -> {
+                            Toast.makeText(this, "TvC is up to date (v" + remoteVersion + ")", Toast.LENGTH_SHORT).show();
+                            String js = String.format(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({up_to_date:true,version:%s,build:%d});}",
+                                    JSONObject.quote(remoteVersion), remoteBuild
+                            );
+                            dashboardWebView.evaluateJavascript(js, null);
+                        });
+                    }
+                    return;
+                }
+
+                if (manual) {
+                    mainHandler.post(() -> Toast.makeText(this, "Downloading update v" + remoteVersion + "...", Toast.LENGTH_SHORT).show());
+                }
+
+                HttpURLConnection zipConn = (HttpURLConnection) new URL(bundleUrl).openConnection();
+                zipConn.setConnectTimeout(12000);
+                zipConn.setReadTimeout(25000);
+                zipConn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
+
+                int zipCode = zipConn.getResponseCode();
+                if (zipCode != 200) {
+                    if (manual) {
+                        mainHandler.post(() -> Toast.makeText(this, "Failed downloading update bundle (HTTP " + zipCode + ")", Toast.LENGTH_SHORT).show());
+                    }
+                    return;
+                }
+
+                File zipFile = new File(getFilesDir(), "ota_temp.zip");
+                try (InputStream zin = zipConn.getInputStream();
+                     FileOutputStream zout = new FileOutputStream(zipFile, false)) {
+                    byte[] zbuf = new byte[8192];
+                    int zr;
+                    while ((zr = zin.read(zbuf)) > 0) {
+                        zout.write(zbuf, 0, zr);
+                    }
+                }
+
+                File stagingDir = new File(getFilesDir(), "ota_staging");
+                deleteDirRecursively(stagingDir);
+                unzipBundle(zipFile, stagingDir);
+                zipFile.delete();
+
+                // Validate extracted bundle
+                File validRoot = stagingDir;
+                if (!new File(validRoot, "index.html").exists() && new File(stagingDir, "static").isDirectory()) {
+                    validRoot = new File(stagingDir, "static");
+                }
+
+                if (!new File(validRoot, "index.html").exists() && !new File(validRoot, "app.js").exists()) {
+                    deleteDirRecursively(stagingDir);
+                    if (manual) {
+                        mainHandler.post(() -> Toast.makeText(this, "Invalid update package", Toast.LENGTH_SHORT).show());
+                    }
+                    return;
+                }
+
+                File otaDir = new File(getFilesDir(), OTA_DIR_NAME);
+                File otaOld = new File(getFilesDir(), "ota_bundle_old");
+                deleteDirRecursively(otaOld);
+
+                if (otaDir.exists()) {
+                    otaDir.renameTo(otaOld);
+                }
+
+                boolean renamed = validRoot.renameTo(otaDir);
+                if (!renamed) {
+                    otaDir.mkdirs();
+                    File[] list = validRoot.listFiles();
+                    if (list != null) {
+                        for (File sf : list) {
+                            sf.renameTo(new File(otaDir, sf.getName()));
+                        }
+                    }
+                }
+                deleteDirRecursively(stagingDir);
+                deleteDirRecursively(otaOld);
+
+                JSONObject newMeta = new JSONObject();
+                newMeta.put("version", remoteVersion);
+                newMeta.put("build", remoteBuild);
+                newMeta.put("release_notes", releaseNotes);
+                newMeta.put("github_repo", repo);
+                newMeta.put("installed_at", System.currentTimeMillis());
+                saveOtaVersionInfo(newMeta);
+
+                mainHandler.post(() -> {
+                    String js = String.format(
+                            "if(window.TimecardBridge && window.TimecardBridge.onOtaUpdateReady){window.TimecardBridge.onOtaUpdateReady({version:%s,build:%d,notes:%s});}",
+                            JSONObject.quote(remoteVersion), remoteBuild, JSONObject.quote(releaseNotes)
+                    );
+                    dashboardWebView.evaluateJavascript(js, null);
+                    Toast.makeText(this, "Update v" + remoteVersion + " ready! Tap reload to apply.", Toast.LENGTH_LONG).show();
+                });
+
+            } catch (Exception e) {
+                if (manual) {
+                    mainHandler.post(() -> Toast.makeText(this, "Update check failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+                }
+            }
+        }).start();
+    }
+
+    private int dpToPx(int dp) {
+        return Math.round(TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, dp, getResources().getDisplayMetrics()
+        ));
+    }
+
+    private void setAuthenticatedFlag(boolean auth) {
+        try {
+            File f = new File(getFilesDir(), AUTH_MARKER_FILENAME);
+            if (auth) {
+                try (FileOutputStream fos = new FileOutputStream(f, false)) {
+                    fos.write("1".getBytes(StandardCharsets.UTF_8));
+                }
+            } else if (f.exists()) {
+                f.delete();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private boolean checkCookiesLoggedIn() {
+        try {
+            File authFlag = new File(getFilesDir(), AUTH_MARKER_FILENAME);
+            if (authFlag.exists()) {
+                return true;
+            }
+            CookieManager cm = CookieManager.getInstance();
+            String portalCookies = cm.getCookie(getPortalBaseUrl());
+            String ssoCookies = cm.getCookie("https://login.microsoftonline.com");
+            boolean hasPortal = portalCookies != null && (portalCookies.contains("user_firstName") || portalCookies.contains("ak_prt") || portalCookies.contains("AMCV_"));
+            boolean hasSso = ssoCookies != null && (ssoCookies.contains("ESTSAUTHPERSISTENT") || ssoCookies.contains("brcap"));
+            return hasPortal || hasSso;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void sendProgressToDashboard(int pct, String stage, String msg, boolean reqLogin) {
+        mainHandler.post(() -> {
+            String js = String.format(
+                    "if(window.TimecardBridge){window.TimecardBridge.updateProgress(%d,%s,%s,%b);}",
+                    pct, JSONObject.quote(stage), JSONObject.quote(msg), reqLogin
+            );
+            dashboardWebView.evaluateJavascript(js, null);
+        });
+    }
+
+    private void sendFinishToDashboard(boolean success, String msg, int weeksSynced, boolean reqLogin) {
+        isSyncRunning = false;
+        mainHandler.post(() -> {
+            String js = String.format(
+                    "if(window.TimecardBridge){window.TimecardBridge.finishSync(%b,%s,%d,%b);}",
+                    success, JSONObject.quote(msg), weeksSynced, reqLogin
+            );
+            dashboardWebView.evaluateJavascript(js, null);
+
+            // Reclaim resources: suspend scraperWebView background execution when idle
+            try {
+                if (scraperWebView != null && (loginOverlayContainer == null || loginOverlayContainer.getVisibility() != View.VISIBLE)) {
+                    scraperWebView.loadUrl("about:blank");
+                    scraperWebView.onPause();
+                }
+            } catch (Exception ignored) {}
+        });
+    }
+
+    private void injectMicrosoftSecurityBypass(WebView view) {
+        if (view == null) return;
+        String bypassJs = "(function(){" +
+                "  try {" +
+                "    var skipSelectors = [" +
+                "      '#btnAskLater', '#skipLink', 'a#skip', 'button#skip'," +
+                "      'a[id*=\"AskLater\"]', 'button[id*=\"AskLater\"]', 'a[id*=\"skip\"]', 'button[id*=\"skip\"]'" +
+                "    ];" +
+                "    for (var i = 0; i < skipSelectors.length; i++) {" +
+                "      var el = document.querySelector(skipSelectors[i]);" +
+                "      if (el && el.offsetParent !== null) { el.click(); return 'CLICKED_SKIP_ID'; }" +
+                "    }" +
+                "    var links = Array.from(document.querySelectorAll('a, button, input[type=\"button\"], input[type=\"submit\"]'));" +
+                "    for (var j = 0; j < links.length; j++) {" +
+                "      var txt = (links[j].innerText || links[j].value || '').trim().toLowerCase();" +
+                "      if (txt.indexOf('skip for now') !== -1 || txt.indexOf('ask later') !== -1 || txt.indexOf('skip setup') !== -1 || txt.indexOf('no thanks') !== -1) {" +
+                "        links[j].click(); return 'CLICKED_SKIP_TEXT';" +
+                "      }" +
+                "    }" +
+                "    var kmsiBtn = document.querySelector('#idSIButton9');" +
+                "    var isKmsi = document.querySelector('#KmsiDescription') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
+                "    if (kmsiBtn && isKmsi && kmsiBtn.offsetParent !== null) {" +
+                "      kmsiBtn.click(); return 'CLICKED_KMSI';" +
+                "    }" +
+                "    var href = (window.location.href || '').toLowerCase();" +
+                "    var bodyTxt = document.body ? (document.body.innerText || '').toLowerCase() : '';" +
+                "    var isSecurityScreen = href.indexOf('mysignins.microsoft.com') !== -1 ||" +
+                "                           bodyTxt.indexOf('more information required') !== -1 ||" +
+                "                           bodyTxt.indexOf('keep your account secure') !== -1 ||" +
+                "                           bodyTxt.indexOf('help us protect your account') !== -1 ||" +
+                "                           bodyTxt.indexOf('secure your account') !== -1;" +
+                "    if (isSecurityScreen) {" +
+                "      setTimeout(function() { window.location.href = '" + getTimecardPortalUrl() + "'; }, 1500);" +
+                "      return 'SECURITY_REDIRECT_SCHEDULED';" +
+                "    }" +
+                "  } catch(e) {}" +
+                "  return 'NOOP';" +
+                "})();";
+        view.evaluateJavascript(bypassJs, null);
+    }
+
+    // Monitor scraperWebView until .timecard-wrapper appears
+    private void pollForTimecardWrapper(final int attempt) {
+        if (!isSyncRunning) return;
+
+        if (attempt > 180) {
+            sendFinishToDashboard(false, "Timed out waiting for Time Card Viewer.", weeksSyncedCount, true);
+            return;
+        }
+
+        String checkJs = "(function(){" +
+                "var w = document.querySelector('.timecard-wrapper');" +
+                "if (w) {" +
+                "  var loader = document.querySelector('#tcvLoader');" +
+                "  var loaderVisible = loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none';" +
+                "  var rows = document.querySelectorAll('tr.timecard-card');" +
+                "  var opts = document.querySelectorAll('.timecard-date-dropdown select option');" +
+                "  if (!loaderVisible && (rows.length > 0 || opts.length > 0)) return 'READY';" +
+                "  return 'WAITING';" +
+                "}" +
+                "var kmsiBtn = document.querySelector('#idSIButton9');" +
+                "var isKmsi = document.querySelector('#KmsiDescription') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
+                "if (kmsiBtn && isKmsi && kmsiBtn.offsetParent !== null) {" +
+                "  kmsiBtn.click(); return 'BYPASSING_KMSI';" +
+                "}" +
+                "var skipCandidates = Array.from(document.querySelectorAll('a, button, input[type=\"button\"], input[type=\"submit\"]'));" +
+                "for (var i = 0; i < skipCandidates.length; i++) {" +
+                "  var txt = (skipCandidates[i].innerText || skipCandidates[i].value || '').trim().toLowerCase();" +
+                "  var id = (skipCandidates[i].id || '').toLowerCase();" +
+                "  if (txt.indexOf('skip for now') !== -1 || txt.indexOf('ask later') !== -1 || txt.indexOf('skip setup') !== -1 || txt.indexOf('no thanks') !== -1 || id === 'btnasklater' || id === 'skiplink' || id.indexOf('asklater') !== -1) {" +
+                "    skipCandidates[i].click(); return 'BYPASSING_SECURITY';" +
+                "  }" +
+                "}" +
+                "var href = (window.location.href || '').toLowerCase();" +
+                "var body = document.body ? (document.body.innerText || '').toLowerCase() : '';" +
+                "var isSecurityScreen = href.indexOf('mysignins.microsoft.com') !== -1 ||" +
+                "                       body.indexOf('more information required') !== -1 ||" +
+                "                       body.indexOf('keep your account secure') !== -1 ||" +
+                "                       body.indexOf('help us protect your account') !== -1 ||" +
+                "                       body.indexOf('secure your account') !== -1;" +
+                "if (isSecurityScreen) return 'FORCE_REDIRECT_PORTAL';" +
+                "var loginSelectors = 'input[name=\"loginfmt\"], #i0116, #i0118, input[name=\"passwd\"], input[type=\"password\"], input[name=\"pf.username\"], input[name=\"pf.pass\"], #idRichContext_DisplaySign, #idTxtBx_SAOTCC_OTC, input[name=\"otc\"]';" +
+                "var inputs = document.querySelectorAll(loginSelectors);" +
+                "for (var j = 0; j < inputs.length; j++) {" +
+                "  var inp = inputs[j];" +
+                "  if (inp && inp.offsetParent !== null && window.getComputedStyle(inp).display !== 'none' && window.getComputedStyle(inp).visibility !== 'hidden') {" +
+                "    return 'LOGIN';" +
+                "  }" +
+                "}" +
+                "return 'WAITING';" +
+                "})();";
+
+        scraperWebView.evaluateJavascript(checkJs, value -> {
+            String status = value != null ? value.replace("\"", "") : "WAITING";
+            if ("READY".equals(status)) {
+                setAuthenticatedFlag(true);
+                CookieManager.getInstance().flush();
+                loginOverlayContainer.setVisibility(View.GONE);
+                sendProgressToDashboard(25, "Processing", "Time Card Viewer loaded. Expanding shift cards...", false);
+                mainHandler.postDelayed(this::extractInitialWeekAndQueueDropdown, 700);
+            } else if ("FORCE_REDIRECT_PORTAL".equals(status)) {
+                scraperWebView.loadUrl(getTimecardPortalUrl());
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 1500);
+            } else if ("BYPASSING_SECURITY".equals(status) || "BYPASSING_KMSI".equals(status)) {
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 700);
+            } else if ("LOGIN".equals(status)) {
+                if (loginOverlayContainer.getVisibility() == View.VISIBLE) {
+                    sendProgressToDashboard(15, "Login Required", "Please sign in and complete 2FA in the window...", true);
+                    mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 1000);
+                } else {
+                    // In background sync, never flash the login window over the dashboard.
+                    // Allow up to 8 polling attempts (~7s) for silent cookie SSO redirects.
+                    if (attempt < 8) {
+                        mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 800);
+                    } else {
+                        sendFinishToDashboard(false, "Session authentication required. Tap Log In to connect.", weeksSyncedCount, true);
+                    }
+                }
+            } else {
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 800);
+            }
+        });
+    }
+
+    // Batch-expand all shift accordions in 50ms and extract initial week + dropdown options
+    private void extractInitialWeekAndQueueDropdown() {
+        String batchExpandJs = "(function(){" +
+                "var lv = document.querySelector('.list-view'); if(lv) lv.click();" +
+                "document.querySelectorAll('tr.timecard-card').forEach(function(r){" +
+                "  if(!r.classList.contains('activeRow')) r.click();" +
+                "});" +
+                "return 'EXPANDED';" +
+                "})();";
+
+        scraperWebView.evaluateJavascript(batchExpandJs, v -> {
+            mainHandler.postDelayed(() -> {
+                scraperWebView.evaluateJavascript("document.documentElement.outerHTML", htmlJson -> {
+                    String rawHtml = unquoteJsString(htmlJson);
+                    String bridgeJs = "window.TimecardBridge.ingestWeekHtml(" + JSONObject.quote(rawHtml) + ", null)";
+                    dashboardWebView.evaluateJavascript(bridgeJs, availWeeksJson -> {
+                        weeksSyncedCount = 1;
+                        pendingWeeksQueue.clear();
+
+                        // If refreshing ONLY the current week (Pull-to-Refresh), skip the 7 finalized weeks
+                        if (requestedMaxWeeks == 1) {
+                            if (requestedSyncTimeoff) {
+                                syncTimeOffBank();
+                            } else {
+                                CookieManager.getInstance().flush();
+                                sendFinishToDashboard(
+                                        true,
+                                        "Current week refreshed!",
+                                        1,
+                                        false
+                                );
+                            }
+                            return;
+                        }
+
+                        try {
+                            String cleanJson = unquoteJsString(availWeeksJson);
+                            JSONArray arr = new JSONArray(cleanJson);
+                            int limit = requestedMaxWeeks > 0 ? Math.min(arr.length(), requestedMaxWeeks) : arr.length();
+                            for (int i = 1; i < limit; i++) {
+                                pendingWeeksQueue.add(arr.getString(i));
+                            }
+                        } catch (Exception ignored) {}
+
+                        totalWeeksToSync = pendingWeeksQueue.size() + 1;
+                        processNextWeekInQueue(1);
+                    });
+                });
+            }, 400);
+        });
+    }
+
+    private void processNextWeekInQueue(final int currentWeekIndex) {
+        if (pendingWeeksQueue.isEmpty()) {
+            syncTimeOffBank();
+            return;
+        }
+
+        final String nextWeekDate = pendingWeeksQueue.remove(0);
+        int pct = Math.min(85, 30 + (int) (((float) currentWeekIndex / Math.max(1, totalWeeksToSync)) * 55));
+        sendProgressToDashboard(
+                pct,
+                "Syncing Week " + (currentWeekIndex + 1) + " of " + totalWeeksToSync,
+                "Loading punches for week ending " + nextWeekDate + "...",
+                false
+        );
+
+        String selectWeekJs = "(function(){" +
+                "var sel = document.querySelector('.timecard-date-dropdown select');" +
+                "if(!sel) return 'NO_SELECT';" +
+                "sel.value = '" + nextWeekDate + "';" +
+                "sel.dispatchEvent(new Event('change', { bubbles: true }));" +
+                "return 'SELECTED';" +
+                "})();";
+
+        scraperWebView.evaluateJavascript(selectWeekJs, val -> {
+            mainHandler.postDelayed(() -> {
+                String expandJs = "(function(){" +
+                        "document.querySelectorAll('tr.timecard-card').forEach(function(r){" +
+                        "  if(!r.classList.contains('activeRow')) r.click();" +
+                        "});" +
+                        "return 'OK';" +
+                        "})();";
+                scraperWebView.evaluateJavascript(expandJs, v2 -> {
+                    mainHandler.postDelayed(() -> {
+                        scraperWebView.evaluateJavascript("document.documentElement.outerHTML", htmlJson -> {
+                            String rawHtml = unquoteJsString(htmlJson);
+                            String bridgeJs = "window.TimecardBridge.ingestWeekHtml("
+                                     + JSONObject.quote(rawHtml) + ", "
+                                     + JSONObject.quote(nextWeekDate) + ")";
+                            dashboardWebView.evaluateJavascript(bridgeJs, r -> {
+                                weeksSyncedCount++;
+                                processNextWeekInQueue(currentWeekIndex + 1);
+                            });
+                        });
+                    }, 350);
+                });
+            }, 950);
+        });
+    }
+
+    private void syncTimeOffBank() {
+        sendProgressToDashboard(90, "Time Off Viewer", "Fetching leave balances & Entitlement Bank...", false);
+        scraperWebView.loadUrl(getTimeoffPortalUrl());
+
+        mainHandler.postDelayed(new Runnable() {
+            int retries = 0;
+            @Override
+            public void run() {
+                scraperWebView.evaluateJavascript(
+                        "document.querySelector('.timeoff-wrapper') ? document.documentElement.outerHTML : ''",
+                        htmlJson -> {
+                            String rawHtml = unquoteJsString(htmlJson);
+                            if (rawHtml != null && rawHtml.contains("timeoff-wrapper")) {
+                                String bridgeJs = "window.TimecardBridge.ingestTimeoffHtml(" + JSONObject.quote(rawHtml) + ")";
+                                dashboardWebView.evaluateJavascript(bridgeJs, r -> {
+                                    CookieManager.getInstance().flush();
+                                    sendFinishToDashboard(
+                                            true,
+                                            "Successfully synced " + weeksSyncedCount + " week(s) & Time Off bank!",
+                                            weeksSyncedCount,
+                                            false
+                                    );
+                                });
+                            } else if (retries < 15) {
+                                retries++;
+                                mainHandler.postDelayed(this, 600);
+                            } else {
+                                sendFinishToDashboard(
+                                        true,
+                                        "Synced " + weeksSyncedCount + " week(s).",
+                                        weeksSyncedCount,
+                                        false
+                                );
+                            }
+                        }
+                );
+            }
+        }, 1200);
+    }
+
+    private String unquoteJsString(String raw) {
+        if (raw == null || "null".equals(raw)) return "";
+        try {
+            return (String) new org.json.JSONTokener(raw).nextValue();
+        } catch (Exception e) {
+            return raw;
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (dashboardWebView != null) {
+            handleNotificationIntent(getIntent());
+            dashboardWebView.evaluateJavascript(
+                    "if(window.onAppResumedSmartCheck){window.onAppResumedSmartCheck();}",
+                    null
+            );
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (loginOverlayContainer != null && loginOverlayContainer.getVisibility() == View.VISIBLE) {
+            loginOverlayContainer.setVisibility(View.GONE);
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    public class AndroidNativeBridge {
+
+        @JavascriptInterface
+        public String loadStateJson() {
+            try {
+                File f = new File(getFilesDir(), STORE_FILENAME);
+                if (!f.exists()) return "";
+                try (FileInputStream fis = new FileInputStream(f)) {
+                    byte[] data = new byte[(int) f.length()];
+                    int read = fis.read(data);
+                    if (read > 0) {
+                        return new String(data, 0, read, StandardCharsets.UTF_8);
+                    }
+                }
+            } catch (Exception ignored) {}
+            return "";
+        }
+
+        @JavascriptInterface
+        public void saveStateJson(String json) {
+            if (json == null) return;
+            try {
+                File f = new File(getFilesDir(), STORE_FILENAME);
+                try (FileOutputStream fos = new FileOutputStream(f, false)) {
+                    fos.write(json.getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception ignored) {}
+        }
+
+        @JavascriptInterface
+        public void saveArchiveJson(String json) {
+            if (json == null || json.trim().isEmpty()) return;
+            try {
+                File f = new File(getFilesDir(), ARCHIVE_FILENAME);
+                JSONObject incoming = new JSONObject(json);
+                JSONArray incomingWeeks = incoming.optJSONArray("archived_weeks");
+                JSONObject incomingDetails = incoming.optJSONObject("week_details");
+                if (incomingDetails == null) incomingDetails = new JSONObject();
+
+                // Cumulatively merge with existing archive file so older months are never deleted
+                if (f.exists() && f.length() > 0) {
+                    try (FileInputStream fis = new FileInputStream(f)) {
+                        byte[] existingBytes = new byte[(int) f.length()];
+                        int read = fis.read(existingBytes);
+                        if (read > 0) {
+                            JSONObject existing = new JSONObject(new String(existingBytes, 0, read, StandardCharsets.UTF_8));
+                            JSONArray existingWeeks = existing.optJSONArray("archived_weeks");
+                            JSONObject existingDetails = existing.optJSONObject("week_details");
+
+                            java.util.LinkedHashMap<String, JSONObject> mergedWeeks = new java.util.LinkedHashMap<>();
+                            if (incomingWeeks != null) {
+                                for (int i = 0; i < incomingWeeks.length(); i++) {
+                                    JSONObject w = incomingWeeks.getJSONObject(i);
+                                    String wed = w.optString("week_end_date");
+                                    if (!wed.isEmpty()) mergedWeeks.put(wed, w);
+                                }
+                            }
+                            if (existingWeeks != null) {
+                                for (int i = 0; i < existingWeeks.length(); i++) {
+                                    JSONObject w = existingWeeks.getJSONObject(i);
+                                    String wed = w.optString("week_end_date");
+                                    if (!wed.isEmpty() && !mergedWeeks.containsKey(wed)) {
+                                        mergedWeeks.put(wed, w);
+                                    }
+                                }
+                            }
+
+                            // Sort weeks descending by week_end_date
+                            java.util.List<String> sortedKeys = new java.util.ArrayList<>(mergedWeeks.keySet());
+                            java.util.Collections.sort(sortedKeys, java.util.Collections.reverseOrder());
+
+                            JSONArray finalWeeks = new JSONArray();
+                            for (String k : sortedKeys) {
+                                finalWeeks.put(mergedWeeks.get(k));
+                            }
+
+                            // Merge week_details
+                            JSONObject finalDetails = existingDetails != null ? new JSONObject(existingDetails.toString()) : new JSONObject();
+                            java.util.Iterator<String> inKeys = incomingDetails.keys();
+                            while (inKeys.hasNext()) {
+                                String k = inKeys.next();
+                                finalDetails.put(k, incomingDetails.get(k));
+                            }
+
+                            JSONObject combined = new JSONObject();
+                            combined.put("archived_weeks", finalWeeks);
+                            combined.put("week_details", finalDetails);
+
+                            // Merge audit_logs
+                            JSONArray incomingAudits = incoming.optJSONArray("audit_logs");
+                            JSONArray existingAudits = existing.optJSONArray("audit_logs");
+                            java.util.LinkedHashMap<String, JSONObject> mergedAudits = new java.util.LinkedHashMap<>();
+                            if (incomingAudits != null) {
+                                for (int i = 0; i < incomingAudits.length(); i++) {
+                                    JSONObject a = incomingAudits.getJSONObject(i);
+                                    String k = a.optString("week_end_date") + "|" + a.optString("date") + "|" + a.optString("field_name") + "|" + a.optString("old_value") + "|" + a.optString("new_value");
+                                    mergedAudits.put(k, a);
+                                }
+                            }
+                            if (existingAudits != null) {
+                                for (int i = 0; i < existingAudits.length(); i++) {
+                                    JSONObject a = existingAudits.getJSONObject(i);
+                                    String k = a.optString("week_end_date") + "|" + a.optString("date") + "|" + a.optString("field_name") + "|" + a.optString("old_value") + "|" + a.optString("new_value");
+                                    if (!mergedAudits.containsKey(k)) mergedAudits.put(k, a);
+                                }
+                            }
+                            JSONArray finalAudits = new JSONArray();
+                            for (JSONObject a : mergedAudits.values()) finalAudits.put(a);
+                            combined.put("audit_logs", finalAudits);
+
+                            // Merge corrections
+                            JSONArray incomingCorrs = incoming.optJSONArray("corrections");
+                            JSONArray existingCorrs = existing.optJSONArray("corrections");
+                            java.util.LinkedHashMap<String, JSONObject> mergedCorrs = new java.util.LinkedHashMap<>();
+                            if (incomingCorrs != null) {
+                                for (int i = 0; i < incomingCorrs.length(); i++) {
+                                    JSONObject c = incomingCorrs.getJSONObject(i);
+                                    String k = c.optString("timestamp") + "|" + c.optString("item") + "|" + c.optString("old_val") + "|" + c.optString("new_val");
+                                    mergedCorrs.put(k, c);
+                                }
+                            }
+                            if (existingCorrs != null) {
+                                for (int i = 0; i < existingCorrs.length(); i++) {
+                                    JSONObject c = existingCorrs.getJSONObject(i);
+                                    String k = c.optString("timestamp") + "|" + c.optString("item") + "|" + c.optString("old_val") + "|" + c.optString("new_val");
+                                    if (!mergedCorrs.containsKey(k)) mergedCorrs.put(k, c);
+                                }
+                            }
+                            JSONArray finalCorrs = new JSONArray();
+                            for (JSONObject c : mergedCorrs.values()) finalCorrs.put(c);
+                            combined.put("corrections", finalCorrs);
+
+                            json = combined.toString();
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                try (FileOutputStream fos = new FileOutputStream(f, false)) {
+                    fos.write(json.getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception ignored) {}
+        }
+
+        @JavascriptInterface
+        public String loadArchiveJson() {
+            try {
+                File f = new File(getFilesDir(), ARCHIVE_FILENAME);
+                if (!f.exists()) return "";
+                try (FileInputStream fis = new FileInputStream(f)) {
+                    byte[] data = new byte[(int) f.length()];
+                    int read = fis.read(data);
+                    if (read > 0) {
+                        return new String(data, 0, read, StandardCharsets.UTF_8);
+                    }
+                }
+            } catch (Exception ignored) {}
+            return "";
+        }
+
+        @JavascriptInterface
+        public boolean isLoggedIn() {
+            return checkCookiesLoggedIn();
+        }
+
+        @JavascriptInterface
+        public void showTimecardNotificationForShift(String title, String message, String weekEndDate, String shiftDate) {
+            mainHandler.post(() -> postNativeNotification(title, message, weekEndDate, shiftDate));
+        }
+
+        @JavascriptInterface
+        public void logoutSession() {
+            setAuthenticatedFlag(false);
+            try {
+                File f = new File(getFilesDir(), STORE_FILENAME);
+                if (f.exists()) {
+                    f.delete();
+                }
+                // NOTE: ARCHIVE_FILENAME is a permanent vault and is NEVER deleted on logout!
+            } catch (Exception ignored) {}
+            mainHandler.post(() -> {
+                CookieManager cm = CookieManager.getInstance();
+                cm.removeAllCookies(null);
+                cm.flush();
+                if (scraperWebView != null) {
+                    scraperWebView.clearCache(true);
+                    scraperWebView.clearHistory();
+                    scraperWebView.loadUrl("about:blank");
+                }
+                if (loginOverlayContainer != null) {
+                    loginOverlayContainer.setVisibility(View.GONE);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void openLoginSheet() {
+            mainHandler.post(() -> {
+                // On first login, automatically sync all 8+ weeks as soon as login completes
+                isSyncRunning = true;
+                requestedMaxWeeks = 0;
+                requestedSyncTimeoff = true;
+                weeksSyncedCount = 0;
+                if (scraperWebView != null) scraperWebView.onResume();
+                loginOverlayContainer.setVisibility(View.VISIBLE);
+                scraperWebView.loadUrl(getTimecardPortalUrl());
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 1000);
+            });
+        }
+
+        @JavascriptInterface
+        public void startBackgroundSyncWithOptions(int maxWeeks, boolean syncTimeoff) {
+            mainHandler.post(() -> {
+                isSyncRunning = true;
+                requestedMaxWeeks = maxWeeks;
+                requestedSyncTimeoff = syncTimeoff;
+                weeksSyncedCount = 0;
+                if (scraperWebView != null) scraperWebView.onResume();
+                // Keep scraper sheet strictly hidden during background sync
+                loginOverlayContainer.setVisibility(View.GONE);
+                String msg = (maxWeeks == 1)
+                        ? "Refreshing current pending week in background..."
+                        : "Navigating to Time Card Viewer in background...";
+                sendProgressToDashboard(15, maxWeeks == 1 ? "Refreshing Current Week" : "Connecting", msg, false);
+                scraperWebView.loadUrl("about:blank");
+                mainHandler.postDelayed(() -> {
+                    scraperWebView.loadUrl(getTimecardPortalUrl());
+                    mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 1000);
+                }, 150);
+            });
+        }
+
+        @JavascriptInterface
+        public void checkForUpdates(boolean manual) {
+            mainHandler.post(() -> performOtaCheckAndDownload(manual));
+        }
+
+        @JavascriptInterface
+        public void reloadApp() {
+            mainHandler.post(() -> {
+                if (dashboardWebView != null) {
+                    dashboardWebView.clearCache(true);
+                    dashboardWebView.reload();
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public String getOtaStatusJson() {
+            return getCurrentOtaInfo().toString();
+        }
+
+        @JavascriptInterface
+        public void resetOtaToFactory() {
+            mainHandler.post(() -> {
+                File otaDir = new File(getFilesDir(), OTA_DIR_NAME);
+                deleteDirRecursively(otaDir);
+                new File(getFilesDir(), OTA_VERSION_FILENAME).delete();
+                Toast.makeText(MainActivity.this, "Reverted to factory APK assets", Toast.LENGTH_SHORT).show();
+                if (dashboardWebView != null) {
+                    dashboardWebView.clearCache(true);
+                    dashboardWebView.reload();
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void setGitHubRepo(String repo) {
+            if (repo != null && !repo.trim().isEmpty()) {
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                        .edit()
+                        .putString(PREF_KEY_GITHUB_REPO, repo.trim())
+                        .apply();
+                mainHandler.post(() -> Toast.makeText(MainActivity.this, "GitHub repository set to " + repo.trim(), Toast.LENGTH_SHORT).show());
+            }
+        }
+    }
+}
+

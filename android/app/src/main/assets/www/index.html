@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1e293b">
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="alternate icon" type="image/png" href="/static/favicon.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <title>TvC - Timecard Viewer</title>
+  <!-- Tailwind CSS (Bundled Locally for 0ms Offline & Android Rendering) -->
+  <script src="/static/tailwind.min.js"></script>
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="/static/styles.css?v=12">
+</head>
+
+<body class="h-full flex flex-col font-sans bg-[#f8f9fa] text-[#212529] antialiased">
+
+  <!-- Top Header Bar -->
+  <header class="bg-white border-b border-[#dee2e6] sticky top-0 z-40 shadow-sm">
+    <div
+      class="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-2.5 sm:py-0 sm:h-16 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2.5 sm:gap-3">
+          <!-- TvC Brand Badge / Logo -->
+          <div
+            class="w-9 h-9 sm:w-10 sm:h-10 bg-[#1e293b] rounded-lg flex items-center justify-center shadow-sm border border-[#334155] border-t-2 border-t-[#f59e0b] shrink-0 p-1">
+            <img src="/static/favicon.svg" alt="TvC Logo" class="w-full h-full object-contain">
+          </div>
+          <div>
+            <h1 class="text-sm sm:text-base font-bold text-[#1e293b] leading-tight flex items-center gap-1.5">
+              <span>TvC</span>
+              <span class="text-xs sm:text-sm font-semibold text-[#6c757d]">• Timecard Viewer</span>
+            </h1>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2 sm:gap-2.5 w-full sm:w-auto justify-between sm:justify-end">
+        <!-- Week Selection Dropdown (Shown after login) -->
+        <div id="weekSelectContainer" class="hidden items-center gap-1.5 flex-1 sm:flex-initial min-w-[165px]">
+          <label for="weekSelect"
+            class="text-[11px] sm:text-xs font-semibold text-[#495057] whitespace-nowrap">Week:</label>
+          <div class="relative flex-1 sm:flex-initial">
+            <select id="weekSelect"
+              class="w-full sm:w-auto bg-white text-[#212529] text-xs font-medium rounded border border-[#ced4da] px-2.5 py-1.5 pr-7 focus:border-[#f59e0b] focus:ring-1 focus:ring-[#f59e0b] focus:outline-none appearance-none cursor-pointer">
+              <option value="">No weeks synced</option>
+            </select>
+            <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-[#6c757d]">
+              <i class="fa-solid fa-chevron-down text-[10px]"></i>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-1.5">
+          <!-- Offline Indicator Badge -->
+          <div id="offlineBadge" class="hidden items-center gap-1.5 px-2.5 py-1 rounded bg-[#fff3cd] text-[#664d03] border border-[#ffecb5] text-xs font-semibold shadow-sm">
+            <i class="fa-solid fa-wifi-slash text-[10px]"></i>
+            <span class="hidden sm:inline">Offline Mode</span>
+          </div>
+
+          <!-- Single Auth Button: Shows "Log In" when logged out, or "Log Out" when logged in -->
+          <button id="authBtn" title="Portal Login"
+            class="px-2.5 py-1.5 text-xs font-semibold rounded border border-[#ced4da] bg-white text-[#495057] hover:bg-[#f8f9fa] flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer whitespace-nowrap">
+            <span id="authDot" class="w-2 h-2 rounded-full bg-[#f59e0b]"></span>
+            <span id="authLabel">Log In</span>
+          </button>
+
+            <!-- Sync Button (Hidden when logged out; only shown when logged in, syncs current week only) -->
+            <button id="syncBtn" title="Sync current week only"
+              class="hidden btn-primary px-3 py-1.5 text-xs items-center gap-1.5 shadow-sm active:scale-95 whitespace-nowrap">
+              <i id="syncIcon" class="fa-solid fa-rotate"></i>
+              <span>Sync</span>
+            </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- OTA Live Update Ready Notification Banner -->
+  <div id="otaUpdateBanner" class="hidden bg-gradient-to-r from-[#1e293b] to-[#0f172a] text-white px-4 py-2.5 shadow-md border-b-2 border-[#f59e0b] sticky top-14 sm:top-16 z-30 transition-all">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs sm:text-sm">
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[#f59e0b] text-[#1e293b] font-bold text-xs shrink-0">
+          <i class="fa-solid fa-sparkles"></i>
+        </span>
+        <div>
+          <span class="font-bold text-[#f59e0b]" id="otaBannerTitle">Update Installed!</span>
+          <span class="text-slate-300 ml-1.5" id="otaBannerDesc">A new version was downloaded over-the-air from GitHub.</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="otaReloadBtn" class="bg-[#f59e0b] hover:bg-[#d97706] text-[#1e293b] px-3 py-1 rounded font-bold text-xs transition shadow-sm cursor-pointer">
+          Reload to Apply
+        </button>
+        <button id="otaDismissBannerBtn" class="text-slate-400 hover:text-white px-1.5 py-1 text-xs cursor-pointer">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pull-Down-to-Refresh Indicator (Refreshes ONLY the Current Pending Week) -->
+  <div id="pullRefreshContainer"
+    class="overflow-hidden transition-all duration-150 ease-out bg-[#fdfaf0] border-b border-transparent flex items-center justify-center select-none"
+    style="height: 0px;">
+    <div class="flex items-center gap-2 text-xs font-bold text-[#1e293b] py-2">
+      <i id="pullRefreshIcon" class="fa-solid fa-arrow-down text-[#f59e0b] transition-transform duration-200"></i>
+      <span id="pullRefreshText">Pull down to refresh current week only</span>
+    </div>
+  </div>
+
+  <!-- Main Container -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-2.5 sm:px-6 lg:px-8 py-3.5 sm:py-6 space-y-3.5 sm:space-y-5">
+
+    <!-- Daily Timecard Added Notification Banner (Tap to jump to week + day) -->
+    <div id="newTimecardToast" class="hidden rounded-lg border-l-4 border-[#198754] bg-[#d1e7dd] text-[#0f5132] p-3.5 sm:p-4 shadow-md transition-all cursor-pointer hover:bg-[#c3e2d3]">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex items-start gap-2.5">
+          <div class="w-8 h-8 rounded-full bg-[#198754] text-white flex items-center justify-center shrink-0 mt-0.5">
+            <i class="fa-solid fa-bell text-xs"></i>
+          </div>
+          <div>
+            <h4 id="newTimecardToastTitle" class="font-bold text-xs sm:text-sm text-[#0f5132]">New Daily Timecard Added!</h4>
+            <p id="newTimecardToastBody" class="text-xs text-[#0f5132]/90 mt-0.5"></p>
+            <p class="text-[11px] font-semibold text-[#0f5132] underline mt-1">Tap to open week &amp; highlight day →</p>
+          </div>
+        </div>
+        <button id="dismissTimecardToastBtn" class="text-[#0f5132]/70 hover:text-[#0f5132] p-1 cursor-pointer" title="Dismiss">
+          <i class="fa-solid fa-xmark text-sm"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Background Sync Progression Bar Card -->
+    <div id="statusBanner"
+      class="hidden rounded-lg border border-[#dee2e6] bg-white p-3.5 sm:p-4 shadow-sm space-y-2.5 transition-all">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+        <div class="flex items-center gap-2">
+          <span class="relative flex h-2.5 w-2.5 shrink-0">
+            <span id="syncPing"
+              class="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#f59e0b] opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#1e293b]"></span>
+          </span>
+          <span id="syncStageTitle" class="font-bold text-[#1e293b] text-xs sm:text-sm">Syncing in background...</span>
+          <span id="syncPercentBadge"
+            class="font-mono font-bold text-xs px-2 py-0.5 rounded bg-[#fff3cd] text-[#856404] border border-[#ffeeba]">0%</span>
+        </div>
+        <div class="flex items-center justify-between sm:justify-end gap-2">
+          <span id="syncDetails" class="text-[11px] text-[#6c757d]">Connecting to portal...</span>
+          <button id="loginFallbackBtn"
+            class="hidden text-[11px] font-bold bg-[#1e293b] hover:bg-[#0f172a] text-white px-2.5 py-1 rounded shadow-sm flex items-center gap-1.5 transition-colors">
+            <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+            <span>Open Login Window</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Progression Bar Track & Fill -->
+      <div class="w-full bg-[#e9ecef] rounded-full h-2.5 overflow-hidden border border-[#dee2e6]">
+        <div id="syncProgressBar"
+          class="bg-gradient-to-r from-[#f59e0b] to-[#d97706] h-2.5 rounded-full transition-all duration-300 ease-out"
+          style="width: 0%"></div>
+      </div>
+
+      <div class="flex items-center justify-between text-[11px] text-[#6c757d]">
+        <span id="statusMessage">Processing in background...</span>
+        <span class="font-medium text-[#495057] hidden sm:inline">Headless Background Mode</span>
+      </div>
+    </div>
+
+    <!-- First-Time / Logged-Out Login Gate Screen (Shown before Timecard Viewer until user logs in) -->
+    <section id="loginRequiredView" class="bg-white border border-[#dee2e6] rounded-lg p-6 sm:p-10 shadow-sm text-center max-w-lg mx-auto my-6 space-y-4">
+      <div class="w-14 h-14 rounded-xl bg-[#1e293b] text-[#f59e0b] flex items-center justify-center mx-auto shadow-sm">
+        <i class="fa-solid fa-lock text-xl"></i>
+      </div>
+      <div class="space-y-1.5">
+        <h2 class="text-lg sm:text-xl font-bold text-[#1e293b]">Sign In Required</h2>
+        <p class="text-xs sm:text-sm text-[#6c757d] leading-relaxed">
+          Please log in to your portal account first to sync and view your timecards, leave entitlements, and punch audit history.
+        </p>
+      </div>
+      <div class="pt-2">
+        <button id="loginGateBtn" type="button"
+          class="btn-primary px-6 py-2.5 text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 shadow-sm cursor-pointer active:scale-95">
+          <i class="fa-solid fa-right-to-bracket"></i>
+          <span>Log In to View Timecards</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Authenticated Dashboard Content (Hidden until user logs in) -->
+    <div id="dashboardContent" class="hidden space-y-3.5 sm:space-y-5">
+
+    <!-- Top Controls & Weekly Summary Bar -->
+    <div class="bg-white border border-[#dee2e6] rounded-lg p-3.5 sm:p-5 shadow-sm space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-[#dee2e6] pb-2.5">
+        <div class="flex items-center gap-3">
+          <h2 id="pageMainHeading" class="timecard-wrapper__subTitle">Time Card Viewer</h2>
+        </div>
+        <div class="flex flex-wrap items-center gap-2.5 text-xs font-semibold">
+          <span class="text-[#495057]">Base Rate: <b id="driverRateTop"
+              class="text-[#1e293b] text-xs sm:text-sm">—</b></span>
+          <span class="text-[#495057]">Status: <span id="weekStatusBadge"
+              class="px-2 py-0.5 rounded bg-[#e9ecef] text-[#495057]">Not Synced</span></span>
+        </div>
+      </div>
+
+      <!-- Weekly Totals Bar with Remaining Hours -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 timecard-wrapper__gridMessages">
+        <div class="flex flex-wrap items-center justify-between sm:justify-start gap-2">
+          <div class="timecard-wrapper__lastUpdated text-[11px] sm:text-xs flex items-center gap-2">
+            <span>LAST UPDATED: <span id="kpiLastUpdated">--</span></span>
+          </div>
+        </div>
+
+        <div
+          class="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-2 sm:gap-5 pt-1 sm:pt-0 border-t sm:border-t-0 border-[#f1f3f5]">
+          <div
+            class="bg-[#f8f9fa] sm:bg-transparent p-2 sm:p-0 rounded border sm:border-0 border-[#e9ecef] timecard-wrapper__grosspPay">
+            <span
+              class="block sm:inline text-[10px] sm:text-xs text-[#6c757d] sm:text-[#212529] uppercase sm:normal-case">Gross
+              Pay</span>
+            <span class="hidden sm:inline">: </span>
+            <span id="kpiGrossPay" class="weekGrossPay font-bold text-sm sm:text-base">0.00</span>
+          </div>
+          <div
+            class="bg-[#f8f9fa] sm:bg-transparent p-2 sm:p-0 rounded border sm:border-0 border-[#e9ecef] timecard-wrapper__totalHours">
+            <span
+              class="block sm:inline text-[10px] sm:text-xs text-[#6c757d] sm:text-[#212529] uppercase sm:normal-case">Total
+              Hours</span>
+            <span class="hidden sm:inline">: </span>
+            <span id="kpiTotalHours" class="weekTotalHours font-bold text-sm sm:text-base">0.00</span>
+          </div>
+          <div
+            class="bg-[#f8f9fa] sm:bg-transparent p-2 sm:p-0 rounded border sm:border-0 border-[#e9ecef] sm:border-l sm:border-[#dee2e6] sm:pl-4">
+            <span class="block sm:inline text-[10px] sm:text-xs font-bold text-[#6c757d] sm:text-[#212529] uppercase sm:normal-case">Remaining DOT</span>
+            <span class="hidden sm:inline">: </span>
+            <span id="kpiDotRemaining" class="font-bold text-sm sm:text-base text-[#198754]">60.00</span>
+            <span id="kpiDotSubText" class="text-[10px] sm:text-xs text-[#6c757d]">/ 60.00h</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs (2x2 Grid on Mobile, Horizontal Bar on Desktop) -->
+    <div class="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-1.5 sm:gap-2 border-b border-[#dee2e6] pb-2">
+      <button id="tabTimeCard"
+        class="tab-btn px-3 sm:px-4 py-2 text-xs font-bold rounded border sm:border-0 sm:rounded-t sm:border-b-2 border-[#1e293b] text-[#1e293b] bg-white flex items-center justify-center sm:justify-start gap-1.5 shadow-sm">
+        <i class="fa-regular fa-calendar-days text-[#f59e0b]"></i>
+        <span>Time Card Viewer</span>
+      </button>
+
+      <button id="tabTimeOff"
+        class="tab-btn px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5">
+        <i class="fa-solid fa-umbrella-beach text-[#0d6efd]"></i>
+        <span>Time Off Viewer</span>
+        <span id="vacationPill"
+          class="text-[10px] bg-[#e7f1ff] text-[#0d6efd] font-bold px-1.5 py-0.2 rounded-full border border-[#b6d4fe]">0.0h</span>
+      </button>
+
+      <button id="tabAudit"
+        class="tab-btn px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5">
+        <i class="fa-solid fa-code-compare text-[#6f42c1]"></i>
+        <span>Punch Audits</span>
+        <span id="auditBadge"
+          class="hidden text-[10px] bg-[#dc3545] text-white font-bold px-1.5 py-0.2 rounded-full">0</span>
+      </button>
+
+      <button id="tabCorrections"
+        class="tab-btn px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5">
+        <i class="fa-solid fa-clock-rotate-left text-[#f59e0b]"></i>
+        <span>Corrections</span>
+        <span id="correctionsBadge"
+          class="hidden text-[10px] bg-[#f59e0b] text-[#1e293b] font-bold px-1.5 py-0.2 rounded-full">0</span>
+      </button>
+
+      <button id="tabArchive"
+        class="tab-btn col-span-2 sm:col-span-1 px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5">
+        <i class="fa-solid fa-box-archive text-[#198754]"></i>
+        <span>Archive</span>
+        <span id="archiveBadge"
+          class="hidden text-[10px] bg-[#d1e7dd] text-[#0f5132] font-bold px-1.5 py-0.2 rounded-full border border-[#badbcc]">0</span>
+      </button>
+    </div>
+
+    <!-- TAB 1: Time Card Viewer (Responsive Mobile Fit + Full Desktop Table) -->
+    <section id="viewTimeCard" class="space-y-2.5">
+      <div class="bg-white border border-[#dee2e6] rounded-lg overflow-hidden shadow-sm">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs table-bordered">
+            <thead>
+              <tr>
+                <th class="w-6 sm:w-8 text-center"></th>
+                <th>Date</th>
+                <th class="hidden sm:table-cell">Pay Code</th>
+                <th class="text-right"><span class="sm:hidden">Punches</span><span class="hidden sm:inline">Start
+                    Time</span></th>
+                <th class="hidden sm:table-cell text-right">End Time</th>
+                <th class="hidden sm:table-cell text-right">Meal/Unpaid</th>
+                <th class="hidden sm:table-cell text-right">Pay Rate</th>
+                <th class="text-right"><span class="sm:hidden">Hrs</span><span class="hidden sm:inline">Total
+                    Hours</span></th>
+                <th class="text-right"><span class="sm:hidden">Pay</span><span class="hidden sm:inline">Gross Pay</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody id="shiftsTableBody" class="divide-y divide-[#dee2e6]">
+              <tr>
+                <td colspan="9" class="p-6 text-center text-[#6c757d]">No timecard data synced yet. Click <b>Log In</b>
+                  to sign in and sync your timecards.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p class="timecard-wrapper__lateComerText">*Indicates late for that day</p>
+    </section>
+
+    <!-- TAB 2: Time Off Viewer (Entitlement Bank) -->
+    <section id="viewTimeOff" class="hidden space-y-4">
+      <div class="bg-white border border-[#dee2e6] rounded-lg p-4 sm:p-5 shadow-sm space-y-3">
+        <h3 class="timeoff-wrapper__subTitle">Entitlement Bank</h3>
+        <div class="flex flex-wrap gap-4 text-xs text-[#212529]">
+          <p><span class="font-bold mr-1.5 text-[#495057]">Employee ID:</span><span id="timeOffEmpId"
+              class="empId font-mono font-semibold">—</span></p>
+          <p><span class="font-bold mr-1.5 text-[#495057]">Employee Name:</span><span id="timeOffEmpName"
+              class="empName font-semibold">—</span></p>
+        </div>
+
+        <div class="pt-1">
+          <div class="overflow-x-auto border border-[#dee2e6] rounded">
+            <table class="w-full text-left text-xs table-bordered">
+              <thead>
+                <tr>
+                  <th>Entitlement</th>
+                  <th>Available</th>
+                  <th>Basis</th>
+                  <th>Next Earn</th>
+                </tr>
+              </thead>
+              <tbody id="entitlementsTableBody" class="divide-y divide-[#dee2e6]">
+                <tr>
+                  <td colspan="4" class="p-6 text-center text-[#6c757d]">No entitlement records found.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: Punch Change Audits (Scoped to Affected / Selected Week) -->
+    <section id="viewAudit" class="hidden space-y-4">
+      <div class="bg-white border border-[#dee2e6] rounded-lg p-4 sm:p-5 shadow-sm space-y-3">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-[#dee2e6] gap-2">
+          <div>
+            <h3 class="text-base font-bold text-[#1e293b] flex items-center gap-2">
+              <i class="fa-solid fa-clock text-[#dc3545]"></i>
+              <span>Punch Modification Auditor</span>
+              <span id="auditWeekLabel" class="text-xs font-semibold px-2 py-0.5 rounded bg-[#e9ecef] text-[#495057]">Current Week</span>
+            </h3>
+            <p class="text-xs text-[#6c757d] mt-0.5">
+              Shows <b>Start Time</b>, <b>End Time</b>, or <b>Meal/Unpaid</b> punch modifications for the selected week.
+            </p>
+          </div>
+
+          <div
+            class="text-xs bg-[#f8f9fa] border border-[#dee2e6] px-3 py-1.5 rounded flex items-center gap-2 text-[#495057]">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>Auto-Auditor Active</span>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto border border-[#dee2e6] rounded">
+          <table class="w-full text-left text-xs table-bordered">
+            <thead>
+              <tr>
+                <th>Detected At</th>
+                <th>Shift Date</th>
+                <th>Punch Field</th>
+                <th>Original</th>
+                <th>Modified</th>
+                <th class="text-right">Difference</th>
+              </tr>
+            </thead>
+            <tbody id="auditTableBody" class="divide-y divide-[#dee2e6]">
+              <tr>
+                <td colspan="6" class="p-6 text-center text-[#6c757d]">No punch modifications detected yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: Corrections Viewer -->
+    <section id="viewCorrections" class="hidden space-y-4">
+      <div class="bg-white border border-[#dee2e6] rounded-lg p-4 sm:p-5 shadow-sm space-y-3">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-[#dee2e6] gap-2">
+          <div>
+            <h3 class="text-base font-bold text-[#1e293b]">Corrections Viewer</h3>
+            <p class="text-xs text-[#6c757d] mt-0.5">Historical log of recorded timecard adjustments.</p>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto border border-[#dee2e6] rounded">
+          <table class="w-full text-left text-xs table-bordered">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Type</th>
+                <th>Action</th>
+                <th>Item</th>
+                <th>Old</th>
+                <th>New</th>
+                <th>Edited By</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="correctionsTableBody" class="divide-y divide-[#dee2e6]">
+              <tr>
+                <td colspan="8" class="p-6 text-center text-[#6c757d]">No corrections found.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: Historical Archive (Weeks Older Than 8 Active Weeks, Grouped by Month) -->
+    <section id="viewArchive" class="hidden space-y-4">
+      <div class="bg-white border border-[#dee2e6] rounded-lg p-4 sm:p-5 shadow-sm space-y-3.5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-[#dee2e6] gap-3">
+          <div>
+            <h3 class="text-base font-bold text-[#1e293b] flex items-center gap-2">
+              <i class="fa-solid fa-box-archive text-[#198754]"></i>
+              <span>Historical Timecard Archive</span>
+              <span id="archiveVaultBadge" class="text-[11px] font-semibold px-2 py-0.5 rounded bg-[#d1e7dd] text-[#0f5132] border border-[#badbcc] flex items-center gap-1">
+                <i class="fa-solid fa-shield-halved text-[10px]"></i> Permanent Vault Active
+              </span>
+            </h3>
+            <p class="text-xs text-[#6c757d] mt-0.5">
+              Active weeks are capped at the <b>8 most recent weeks</b>. All older weeks, punch audits, and corrections are permanently locked in your local &amp; cloud database vault so they are never lost.
+            </p>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <label for="archiveMonthSelect" class="text-xs font-bold text-[#495057] whitespace-nowrap">Select Month:</label>
+            <div class="relative">
+              <select id="archiveMonthSelect"
+                class="bg-white text-[#212529] text-xs font-semibold rounded border border-[#ced4da] px-3 py-1.5 pr-8 focus:border-[#f59e0b] focus:ring-1 focus:ring-[#f59e0b] focus:outline-none appearance-none cursor-pointer">
+                <option value="">No archived months</option>
+              </select>
+              <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-[#6c757d]">
+                <i class="fa-solid fa-chevron-down text-[10px]"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Monthly Summary Bar -->
+        <div id="archiveMonthSummary" class="flex flex-wrap items-center justify-between gap-2 bg-[#f8f9fa] border border-[#e9ecef] rounded px-3.5 py-2 text-xs">
+          <span id="archiveMonthLabel" class="font-bold text-[#1e293b]">Select a month to view archived weeks</span>
+          <div class="flex flex-wrap items-center gap-4 font-semibold text-[#495057]">
+            <span>Weeks: <b id="archiveMonthWeeksCount" class="text-[#1e293b]">0</b></span>
+            <span>Month Hours: <b id="archiveMonthHours" class="text-[#1e293b]">0.00</b></span>
+            <span>Month Gross Pay: <b id="archiveMonthGrossPay" class="text-[#198754]">$0.00</b></span>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto border border-[#dee2e6] rounded">
+          <table class="w-full text-left text-xs table-bordered">
+            <thead>
+              <tr>
+                <th>Week Ending</th>
+                <th>Status</th>
+                <th class="text-right">Total Hours</th>
+                <th class="text-right">Gross Pay</th>
+                <th class="text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="archiveTableBody" class="divide-y divide-[#dee2e6]">
+              <tr>
+                <td colspan="5" class="p-6 text-center text-[#6c757d]">No archived weeks yet. Weeks older than the 8 most recent active weeks are automatically stored here.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    </div>
+
+  </main>
+
+  <!-- App Footer -->
+  <footer class="bg-white border-t border-[#dee2e6] py-4 mt-6 text-center text-[11px] sm:text-xs text-[#6c757d] px-3 space-y-1.5">
+    <div>
+      <span class="font-bold text-[#1e293b]">TvC - Timecard Viewer</span>
+      <span class="mx-1.5 text-[#ced4da]">•</span>
+      <span>Personal Shift &amp; Leave Auditor</span>
+    </div>
+    <div class="text-[10px] sm:text-[11px] text-[#868e96] flex flex-wrap items-center justify-center gap-1.5">
+      <span class="font-semibold text-[#495057]" id="footerVersionBadge">v2.4.1</span>
+      <span class="text-[#ced4da]">•</span>
+      <span class="font-mono text-[#6c757d]" id="footerBuildBadge">Build 2026.11.08</span>
+      <span class="text-[#ced4da]">•</span>
+      <span class="text-[#198754] font-medium"><i class="fa-solid fa-shield-halved text-[9px]"></i> Permanent Vault Active</span>
+      <span class="text-[#ced4da]">•</span>
+      <button id="checkOtaUpdateBtn" class="inline-flex items-center gap-1 text-[#0d6efd] hover:text-[#0b5ed7] font-semibold underline decoration-dotted cursor-pointer">
+        <i class="fa-solid fa-cloud-arrow-down text-[10px]"></i> Check for Updates
+      </button>
+    </div>
+  </footer>
+
+  <!-- OTA Settings & Update Status Modal -->
+  <div id="otaModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+    <div class="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden border border-[#dee2e6]">
+      <div class="bg-[#1e293b] text-white px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-cloud-arrow-down text-[#f59e0b]"></i>
+          <h3 class="font-bold text-sm">App Updates &amp; Live OTA</h3>
+        </div>
+        <button id="closeOtaModalBtn" class="text-slate-400 hover:text-white cursor-pointer">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div class="p-4 space-y-3.5 text-xs text-[#495057]">
+        <div class="bg-[#f8f9fa] rounded-lg p-3 border border-[#dee2e6] space-y-1.5">
+          <div class="flex justify-between">
+            <span class="text-[#6c757d]">Installed Version:</span>
+            <span class="font-bold text-[#1e293b]" id="otaModalVersion">v2.4.1</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-[#6c757d]">Build Timestamp:</span>
+            <span class="font-mono text-[#1e293b]" id="otaModalBuild">2026110802</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-[#6c757d]">GitHub Repository:</span>
+            <span class="font-medium text-[#0d6efd] font-mono text-[11px]" id="otaModalRepo">solotreason/TvC</span>
+          </div>
+        </div>
+
+        <div id="otaModalStatusMsg" class="text-center font-medium py-1 text-slate-600">
+          Updates download over-the-air from GitHub without reinstalling the APK.
+        </div>
+
+        <div class="flex flex-col gap-2 pt-1">
+          <button id="otaModalCheckBtn" class="w-full bg-[#1e293b] hover:bg-[#334155] text-white font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer">
+            <i class="fa-solid fa-arrows-rotate"></i> Check GitHub for Updates
+          </button>
+          <button id="otaModalRollbackBtn" class="w-full bg-white hover:bg-[#fff5f5] text-[#dc3545] border border-[#f8d7da] font-semibold py-1.5 px-3 rounded-lg text-[11px] transition cursor-pointer">
+            Revert to Factory APK Bundle
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/android_bridge.js?v=14"></script>
+  <script src="/static/app.js?v=14"></script>
+</body>
+
+</html>

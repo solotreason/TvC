@@ -1,0 +1,165 @@
+/* Clean Light Theme Color Palette & Layout Styles */
+
+:root {
+  --brand-primary: #1e293b;
+  --brand-accent: #f59e0b;
+  --brand-accent-hover: #d97706;
+  --text-dark: #212529;
+  --border-color: #dee2e6;
+  --active-row: #fef9e7;
+}
+
+html,
+body {
+  overscroll-behavior-y: contain;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: var(--text-dark);
+  background-color: #f4f5f7;
+}
+
+/* Header & Banner */
+.app-header {
+  background-color: #ffffff;
+  border-bottom: 2px solid #e9ecef;
+}
+
+.btn-primary {
+  background-color: var(--brand-accent);
+  color: var(--brand-primary);
+  font-weight: 700;
+  border: 1px solid #d97706;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+
+.btn-primary:hover {
+  background-color: #eab308;
+  color: #0f172a;
+}
+
+/* Table styling */
+.table-bordered {
+  border: 1px solid var(--border-color);
+  background-color: #ffffff;
+}
+
+.table-bordered th, 
+.table-bordered td {
+  border: 1px solid var(--border-color);
+  padding: 0.65rem 0.85rem;
+  vertical-align: middle;
+}
+
+@media (max-width: 639px) {
+  .table-bordered th,
+  .table-bordered td {
+    padding: 0.5rem 0.45rem;
+    font-size: 0.75rem;
+  }
+  .timecard-wrapper__subTitle,
+  .timeoff-wrapper__subTitle {
+    font-size: 1.25rem;
+  }
+}
+
+.table-bordered thead th {
+  background-color: #f8f9fa;
+  color: #495057;
+  font-weight: 600;
+  font-size: 0.85rem;
+  border-bottom: 2px solid var(--border-color);
+}
+
+/* Expandable shift row */
+tr.timecard-card {
+  transition: background-color 0.15s ease;
+}
+
+tr.timecard-card:hover {
+  background-color: #f8f9fa;
+}
+
+tr.timecard-card.activeRow {
+  background-color: var(--active-row) !important;
+  border-left: 4px solid var(--brand-accent) !important;
+}
+
+tr.acc-row {
+  background-color: #ffffff;
+}
+
+tr.dailyTotalRow td {
+  background-color: #fdfaf0;
+  font-weight: 700;
+  color: var(--brand-primary);
+}
+
+/* Subtitles */
+.timecard-wrapper__subTitle,
+.timeoff-wrapper__subTitle {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--brand-primary);
+  letter-spacing: -0.02em;
+}
+
+/* Summary Grid Messages */
+.timecard-wrapper__gridMessages {
+  font-size: 0.85rem;
+}
+
+.timecard-wrapper__lastUpdated {
+  font-weight: 700;
+  color: #495057;
+}
+
+.timecard-wrapper__grosspPay,
+.timecard-wrapper__totalHours {
+  font-weight: 700;
+  color: #212529;
+}
+
+.timecard-wrapper__grosspPay span,
+.timecard-wrapper__totalHours span {
+  color: var(--brand-primary);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+/* Notification Deep-Link Highlight Pulse */
+@keyframes notificationPulse {
+  0% {
+    background-color: #d1e7dd;
+    box-shadow: inset 4px 0 0 #198754, 0 0 0 2px rgba(25, 135, 84, 0.35);
+  }
+  50% {
+    background-color: #fff3cd;
+    box-shadow: inset 4px 0 0 #f59e0b, 0 0 0 4px rgba(245, 158, 11, 0.35);
+  }
+  100% {
+    background-color: #d1e7dd;
+    box-shadow: inset 4px 0 0 #198754, 0 0 0 0 rgba(25, 135, 84, 0);
+  }
+}
+
+tr.notification-highlight-pulse > td {
+  animation: notificationPulse 1.15s ease-in-out 3;
+  background-color: #d1e7dd !important;
+}

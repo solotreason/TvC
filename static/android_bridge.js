@@ -619,7 +619,7 @@
           return makeJsonResponse(JSON.parse(window.AndroidNative.getOtaStatusJson()));
         } catch (e) {}
       }
-      return makeJsonResponse({ version: '2.4.2', build: 2026110902, github_repo: 'solotreason/TvC' });
+      return makeJsonResponse({ version: '2.4.2', build: 2026110909, github_repo: 'solotreason/TvC' });
     }
 
     if (url.endsWith('/api/ota/check')) {

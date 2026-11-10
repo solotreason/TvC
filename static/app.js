@@ -265,9 +265,12 @@ async function loadWeeks(preferredWeek = null) {
     if (!data.weeks || data.weeks.length === 0) {
       select.innerHTML = '<option value="">No weeks synced</option>';
       currentWeekData = null;
-      document.getElementById('kpiGrossPay').textContent = '0.00';
-      document.getElementById('kpiTotalHours').textContent = '0.00';
-      document.getElementById('kpiLastUpdated').textContent = '--';
+      const grossEl = document.getElementById('kpiGrossPay');
+      const hoursEl = document.getElementById('kpiTotalHours');
+      const updatedEl = document.getElementById('kpiLastUpdated');
+      if (grossEl) grossEl.textContent = '0.00';
+      if (hoursEl) hoursEl.textContent = '0.00';
+      if (updatedEl) updatedEl.textContent = '--';
       const driverRateEl = document.getElementById('driverRateTop');
       if (driverRateEl) driverRateEl.textContent = '—';
       const statusBadge = document.getElementById('weekStatusBadge');
@@ -481,9 +484,12 @@ function toggleActiveRow(dateStr) {
 // Render weekly view
 function renderWeek(data) {
   // 1. Update top summary metrics
-  document.getElementById('kpiGrossPay').textContent = formatDecimal(data.gross_pay);
-  document.getElementById('kpiTotalHours').textContent = formatDecimal(data.total_hours);
-  document.getElementById('kpiLastUpdated').textContent = data.last_updated_source || 'Recently';
+  const grossEl = document.getElementById('kpiGrossPay');
+  const hoursEl = document.getElementById('kpiTotalHours');
+  const updatedEl = document.getElementById('kpiLastUpdated');
+  if (grossEl) grossEl.textContent = formatDecimal(data.gross_pay);
+  if (hoursEl) hoursEl.textContent = formatDecimal(data.total_hours);
+  if (updatedEl) updatedEl.textContent = data.last_updated_source || 'Recently';
 
   const statusBadge = document.getElementById('weekStatusBadge');
   if (statusBadge) {
@@ -788,15 +794,20 @@ async function loadTimeOff() {
     const profile = data.profile;
     const entitlements = data.entitlements || [];
 
-    document.getElementById('timeOffEmpName').textContent = (profile && profile.emp_name) ? profile.emp_name : '—';
-    document.getElementById('timeOffEmpId').textContent = (profile && profile.emp_id) ? profile.emp_id : '—';
+    const empNameEl = document.getElementById('timeOffEmpName');
+    const empIdEl = document.getElementById('timeOffEmpId');
+    if (empNameEl) empNameEl.textContent = (profile && profile.emp_name) ? profile.emp_name : '—';
+    if (empIdEl) empIdEl.textContent = (profile && profile.emp_id) ? profile.emp_id : '—';
 
     // Update vacation pill in tab
-    const vac = entitlements.find(e => e.timeoff_type === 'VAC' || e.title === 'Vacation');
-    if (vac) {
-      document.getElementById('vacationPill').textContent = `${formatDecimal(vac.available_time)} ${vac.time_basis.toLowerCase()}`;
-    } else {
-      document.getElementById('vacationPill').textContent = '0.0h';
+    const vacPill = document.getElementById('vacationPill');
+    if (vacPill) {
+      const vac = entitlements.find(e => e.timeoff_type === 'VAC' || e.title === 'Vacation');
+      if (vac) {
+        vacPill.textContent = `${formatDecimal(vac.available_time)} ${(vac.time_basis || 'h').toLowerCase()}`;
+      } else {
+        vacPill.textContent = '0.0h';
+      }
     }
 
     const tbody = document.getElementById('entitlementsTableBody');
@@ -1390,7 +1401,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadWeeks(),
     loadTimeOff(),
     loadAuditHistory()
-  ]);
+  ]).catch(err => console.error('Initial load error:', err));
 
   const dismissToastBtn = document.getElementById('dismissTimecardToastBtn');
   if (dismissToastBtn) {

@@ -13,8 +13,8 @@ import time
 import base64
 import shutil
 import sqlite3
-from typing import List, Dict, Any, Optional, Callable
-from playwright.sync_api import sync_playwright, BrowserContext, Page, Route
+from typing import Dict, Any, Optional, Callable
+from playwright.sync_api import sync_playwright
 from .parser import parse_timecard_html
 from .timeoff_parser import parse_timeoff_html
 from .database import (
@@ -202,6 +202,7 @@ def launch_login_flow(timeout_seconds: int = 180) -> Dict[str, Any]:
     """
     os.makedirs(SESSION_DIR, exist_ok=True)
     with sync_playwright() as p:
+        context = None
         try:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=SESSION_DIR,
@@ -219,11 +220,16 @@ def launch_login_flow(timeout_seconds: int = 180) -> Dict[str, Any]:
 
             _mark_authenticated()
             time.sleep(2)  # Give cookies a moment to write to disk
-            context.close()
             return {"success": True, "logged_in": True, "message": "Successfully logged in and session saved!"}
         except Exception as e:
             clean_err = str(e).replace(_DEFAULT_PORTAL_BASE, "[portal]")
             return {"success": False, "logged_in": False, "error": f"Login was not completed: {clean_err}"}
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
 
 def run_timecard_sync(

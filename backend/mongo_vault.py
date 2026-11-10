@@ -30,10 +30,7 @@ def _load_env_file():
 
 _load_env_file()
 
-DEFAULT_MONGO_URI = os.environ.get(
-    "MONGODB_URI",
-    "mongodb+srv://solotreason_db_user:crFbSjbTw46SRJ2@cluster0.rj3o4lz.mongodb.net/?retryWrites=true&w=majority"
-)
+DEFAULT_MONGO_URI = os.environ.get("MONGODB_URI", "")
 DB_NAME = os.environ.get("MONGODB_DB_NAME", "timecard_tracker")
 COLLECTION_NAME = "archive_vault"
 
@@ -46,8 +43,10 @@ def get_mongo_client():
         if _client is not None:
             return _client
         try:
-            from pymongo import MongoClient
             uri = os.environ.get("MONGODB_URI", DEFAULT_MONGO_URI)
+            if not uri:
+                return None
+            from pymongo import MongoClient
             _client = MongoClient(
                 uri,
                 serverSelectionTimeoutMS=4000,

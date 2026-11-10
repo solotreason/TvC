@@ -385,10 +385,11 @@ def get_entitlements() -> Dict[str, Any]:
 
 def get_all_audit_logs() -> List[Dict[str, Any]]:
     conn = get_connection()
-    cursor = conn.execute("SELECT * FROM shift_audit_log ORDER BY id DESC LIMIT 100")
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    try:
+        cursor = conn.execute("SELECT * FROM shift_audit_log ORDER BY id DESC LIMIT 100")
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
 
 
 def log_sync_start() -> int:
@@ -413,10 +414,11 @@ def log_sync_complete(sync_id: int, status: str, message: str, weeks_synced: int
 
 def get_all_weeks() -> List[Dict[str, Any]]:
     conn = get_connection()
-    cursor = conn.execute("SELECT * FROM weeks ORDER BY week_end_date DESC")
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    try:
+        cursor = conn.execute("SELECT * FROM weeks ORDER BY week_end_date DESC")
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
 
 
 def get_active_and_archived_weeks(limit: int = ACTIVE_WEEK_LIMIT) -> Dict[str, List[Dict[str, Any]]]:
@@ -610,62 +612,65 @@ def trigger_full_vault_sync(emp_id: Optional[str] = None) -> Dict[str, Any]:
 
 def get_week_details(week_end_date: str) -> Optional[Dict[str, Any]]:
     conn = get_connection()
-    week_row = conn.execute("SELECT * FROM weeks WHERE week_end_date = ?", (week_end_date,)).fetchone()
-    if not week_row:
+    try:
+        week_row = conn.execute("SELECT * FROM weeks WHERE week_end_date = ?", (week_end_date,)).fetchone()
+        if not week_row:
+            vault = load_archive_vault()
+            return vault.get("week_details", {}).get(week_end_date)
+
+        shifts = [
+            dict(s) for s in conn.execute(
+                "SELECT * FROM shifts WHERE week_end_date = ? ORDER BY date ASC",
+                (week_end_date,)
+            ).fetchall()
+        ]
+
+        if shifts:
+            shift_dates = [s["date"] for s in shifts]
+            placeholders = ",".join("?" for _ in shift_dates)
+
+            details_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
+            for d_row in conn.execute(
+                f"SELECT * FROM shift_details WHERE shift_date IN ({placeholders}) ORDER BY id ASC",
+                shift_dates
+            ).fetchall():
+                details_by_date[d_row["shift_date"]].append(dict(d_row))
+
+            audits_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
+            for a_row in conn.execute(
+                f"SELECT * FROM shift_audit_log WHERE date IN ({placeholders}) ORDER BY id DESC",
+                shift_dates
+            ).fetchall():
+                audits_by_date[a_row["date"]].append(dict(a_row))
+
+            for s in shifts:
+                s["details"] = details_by_date.get(s["date"], [])
+                s["audit_history"] = audits_by_date.get(s["date"], [])
+
+        result = dict(week_row)
+        result["shifts"] = shifts
+        return result
+    finally:
         conn.close()
-        # Fallback to permanent archive vault if week aged out of DB
-        vault = load_archive_vault()
-        return vault.get("week_details", {}).get(week_end_date)
-
-    shifts = [
-        dict(s) for s in conn.execute(
-            "SELECT * FROM shifts WHERE week_end_date = ? ORDER BY date ASC",
-            (week_end_date,)
-        ).fetchall()
-    ]
-
-    if shifts:
-        shift_dates = [s["date"] for s in shifts]
-        placeholders = ",".join("?" for _ in shift_dates)
-
-        details_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
-        for d_row in conn.execute(
-            f"SELECT * FROM shift_details WHERE shift_date IN ({placeholders}) ORDER BY id ASC",
-            shift_dates
-        ).fetchall():
-            details_by_date[d_row["shift_date"]].append(dict(d_row))
-
-        audits_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
-        for a_row in conn.execute(
-            f"SELECT * FROM shift_audit_log WHERE date IN ({placeholders}) ORDER BY id DESC",
-            shift_dates
-        ).fetchall():
-            audits_by_date[a_row["date"]].append(dict(a_row))
-
-        for s in shifts:
-            s["details"] = details_by_date.get(s["date"], [])
-            s["audit_history"] = audits_by_date.get(s["date"], [])
-
-    conn.close()
-    result = dict(week_row)
-    result["shifts"] = shifts
-    return result
 
 
 def get_all_corrections() -> List[Dict[str, Any]]:
     conn = get_connection()
-    cursor = conn.execute("SELECT * FROM corrections ORDER BY timestamp DESC, id DESC")
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    try:
+        cursor = conn.execute("SELECT * FROM corrections ORDER BY timestamp DESC, id DESC")
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
 
 
 def get_latest_sync_status() -> Optional[Dict[str, Any]]:
     conn = get_connection()
-    cursor = conn.execute("SELECT * FROM sync_logs ORDER BY id DESC LIMIT 1")
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        cursor = conn.execute("SELECT * FROM sync_logs ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def clear_all_data():

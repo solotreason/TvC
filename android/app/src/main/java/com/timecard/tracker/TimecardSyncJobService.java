@@ -143,10 +143,13 @@ public class TimecardSyncJobService extends JobService {
                 "  var shifts = [];" +
                 "  for (var i = 0; i < rows.length; i++) {" +
                 "    var r = rows[i];" +
-                "    var dEl = r.querySelector('.day-date, .shift-date, td:first-child');" +
-                "    var hEl = r.querySelector('.total-hours, td:nth-child(5)');" +
-                "    var d = dEl ? dEl.innerText.trim() : '';" +
-                "    var h = hEl ? hEl.innerText.trim() : '';" +
+                "    var d = r.getAttribute('data-date') || '';" +
+                "    if (!d) {" +
+                "      var dEl = r.querySelector('.day-date, .shift-date');" +
+                "      d = dEl ? dEl.innerText.trim() : '';" +
+                "    }" +
+                "    var hEl = r.querySelector('.total-hours, td:nth-child(7)');" +
+                "    var h = hEl ? hEl.innerText.trim() : '0.00';" +
                 "    if (d) shifts.push({date: d, hours: h});" +
                 "  }" +
                 "  var sel = document.querySelector('.timecard-date-dropdown select');" +

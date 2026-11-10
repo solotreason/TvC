@@ -75,7 +75,7 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026110902L;
+    private static final long APP_BASE_BUILD = 2026110909L;
     private static final String APP_BASE_VERSION = "2.4.2";
 
     private WebView dashboardWebView;
@@ -618,8 +618,13 @@ public class MainActivity extends Activity {
 
                 File stagingDir = new File(getFilesDir(), "ota_staging");
                 deleteDirRecursively(stagingDir);
-                unzipBundle(zipFile, stagingDir);
-                zipFile.delete();
+                try {
+                    unzipBundle(zipFile, stagingDir);
+                } finally {
+                    if (zipFile.exists()) {
+                        zipFile.delete();
+                    }
+                }
 
                 // Validate extracted bundle
                 File validRoot = stagingDir;

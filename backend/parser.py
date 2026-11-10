@@ -8,7 +8,7 @@ Extracts:
 - Corrections table entries
 """
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from bs4 import BeautifulSoup
 from .time_utils import parse_decimal_time
 

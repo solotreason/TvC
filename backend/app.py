@@ -195,7 +195,7 @@ def get_week(week_end_date: str):
     total_dt_amt = 0.0
     total_late_shifts = 0
 
-    for s in data["shifts"]:
+    for s in data.get("shifts") or []:
         if s.get("is_late"):
             total_late_shifts += 1
         for det in s.get("details", []):
@@ -385,7 +385,7 @@ def get_ota_status():
             pass
     return {
         "version": "2.4.2",
-        "build": 2026110902,
+        "build": 2026110909,
         "github_repo": "solotreason/TvC",
         "release_notes": "OTA Live Update Active"
     }

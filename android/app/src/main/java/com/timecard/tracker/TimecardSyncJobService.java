@@ -204,12 +204,15 @@ public class TimecardSyncJobService extends JobService {
             }
 
             // Detect newly posted shift dates
+            boolean hasNewShifts = false;
             for (int j = 0; j < newShifts.length(); j++) {
                 JSONObject s = newShifts.getJSONObject(j);
                 String shiftDate = s.optString("date", "");
                 String hours = s.optString("hours", "0.00");
 
                 if (!shiftDate.isEmpty() && !knownDates.contains(shiftDate)) {
+                    knownDates.add(shiftDate);
+                    hasNewShifts = true;
                     // New daily timecard found while app was closed!
                     postNativeNotification(
                             "New Timecard Posted!",
@@ -217,6 +220,36 @@ public class TimecardSyncJobService extends JobService {
                             weekEndDate,
                             shiftDate
                     );
+                }
+            }
+
+            // Save newly discovered shift dates so they are not repeatedly notified every 15 minutes
+            if (hasNewShifts && storeObj != null) {
+                JSONArray weeks = storeObj.optJSONArray("weeks");
+                if (weeks != null && weeks.length() > 0) {
+                    JSONObject latestWeek = weeks.getJSONObject(0);
+                    JSONArray existingShifts = latestWeek.optJSONArray("shifts");
+                    if (existingShifts == null) {
+                        existingShifts = new JSONArray();
+                        latestWeek.put("shifts", existingShifts);
+                    }
+                    for (int j = 0; j < newShifts.length(); j++) {
+                        JSONObject s = newShifts.getJSONObject(j);
+                        String shiftDate = s.optString("date", "");
+                        boolean alreadyInList = false;
+                        for (int k = 0; k < existingShifts.length(); k++) {
+                            if (shiftDate.equals(existingShifts.getJSONObject(k).optString("date", ""))) {
+                                alreadyInList = true;
+                                break;
+                            }
+                        }
+                        if (!alreadyInList) {
+                            existingShifts.put(s);
+                        }
+                    }
+                    try (FileOutputStream fos = new FileOutputStream(storeFile, false)) {
+                        fos.write(storeObj.toString().getBytes(StandardCharsets.UTF_8));
+                    } catch (Exception ignored) {}
                 }
             }
 

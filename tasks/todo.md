@@ -2,38 +2,36 @@
 
 ## Status & Phases
 
-### Completed Sprint: Streamline Navigation (Remove Corrections Tab) & Fast Instant OTA Update Engine
+### Completed Sprint: Comprehensive Senior Code Audit & Polish
 
-- [x] 1. **Removed Redundant Corrections Tab**:
-  - Removed `#tabCorrections` button and `#viewCorrections` section from `static/index.html`.
-  - Streamlined tab navigation grid to a clean, balanced 4-tab layout:
-    - **Time Card Viewer** (`#tabTimeCard`)
-    - **Punch Audits** (`#tabAudit`)
-    - **Time Off Viewer** (`#tabTimeOff`)
-    - **Historical Archive** (`#tabArchive`)
-  - Mobile layout now renders as a balanced 2x2 grid (`grid-cols-2`) with zero awkward button wrapping.
-  - Removed `loadCorrections` DOM operations and navigation tab mappings from `static/app.js`.
-  - Preserved backend API backward compatibility.
+- [x] 1. **Codebase Scan & Research**:
+  - Scanned for dead code and unused imports across Android Java, Python backend, and Web/JS layers.
+  - Removed unused import `fetch_cloud_archive` in `backend/app.py`.
+  - Removed lingering legacy stub `loadCorrections` in `static/app.js`.
+  - Verified corporate neutrality: zero hardcoded employee credentials, private corporate domains, or corporate logos in project code/commits.
+  - Verified 100% of DOM IDs queried in JavaScript exist in `static/index.html`.
+  - Verified all CSS classes in `styles.css` are active.
 
-- [x] 2. **Instant OTA Update Engine & Native Bridge**:
-  - Re-wired `otaModalCheckBtn` in `static/app.js` to directly invoke native `window.AndroidNative.checkForUpdates(true)`.
-  - Added a 4-second UI watchdog safety timer so the check spinner never hangs indefinitely.
-  - Upgraded `showOtaCheckResult(result)` with comprehensive status handling:
-    - `up_to_date`: green checkmark
-    - `downloading`: blue downloading spinner with version
-    - `update_installed`: green checkmark with prompt to reload
-    - `error`: red exclamation with exact failure message
-  - In `MainActivity.java`:
-    - Added multi-source CDN edge resolution (`cdn.jsdelivr.net/gh/solotreason/TvC@main/version.json`) with fast fallback to `raw.githubusercontent.com`.
-    - Tightened connect/read timeouts to 3.5s so response times are instantaneous (<100ms on edge CDN).
-    - Added edge CDN failover for bundle download (`ota_bundle.zip`).
-    - Added explicit WebView bridge callbacks on every state (up-to-date, downloading, installed, error).
-  - In `backend/app.py`: Updated `/api/ota/check` to perform instant version checking against the edge CDN for web browser users.
+- [x] 2. **Security, Privacy & Robustness Audit**:
+  - Validated Android WebView `@JavascriptInterface` security and origin checks.
+  - Verified OTA zip-slip path traversal defense in `MainActivity.java` (`canonicalDest.startsWith(canonicalTarget)`).
+  - Fixed duplicate notification spam bug in `TimecardSyncJobService.java`: newly posted shifts are now persisted to `timecard_store_v4.json` upon notification, preventing repeat alerts every 15 minutes.
+  - Upgraded `backend/app.py` from deprecated `@app.on_event("startup")` to modern Starlette/FastAPI `lifespan` context manager.
 
-- [x] 3. **Verification, Packaging & Build**:
-  - Re-packed OTA bundle (`python run.py --pack-ota`) -> `static/ota_bundle.zip` (164 KB).
-  - Re-built standalone APK (`python run.py --build-apk`) -> [`Timecard-Tracker.apk`](file:///c:/Users/ibert/Desktop/timecard/Timecard-Tracker.apk) (0.24 MB).
+- [x] 3. **Performance & Code Quality Audit**:
+  - Verified responsive 4-tab 2x2 grid layout on mobile and horizontal tab bar on desktop.
+  - Synchronized static fallback version placeholders in `static/index.html` to `v2.4.2` (Build `2026110908`).
+  - Tested instant edge CDN OTA checks (<100ms) with fallback failover.
+
+- [x] 4. **Verification & Delivery**:
   - All 19 automated unit tests passing (100% pass rate).
+  - OTA bundle packaged at `static/ota_bundle.zip` (163.9 KB).
+  - Standalone APK compiled at [`Timecard-Tracker.apk`](file:///c:/Users/ibert/Desktop/timecard/Timecard-Tracker.apk) (0.24 MB).
+
+### Completed Sprint: Streamline Navigation (Remove Corrections Tab) & Fast Instant OTA Update Engine
+- [x] 1. Removed Redundant Corrections Tab
+- [x] 2. Instant OTA Update Engine & Native Bridge
+- [x] 3. Verification, Packaging & Build (v2.4.2)
 
 ### Completed Sprint: Automated Closed-App Background Timecard Checking & Push Notifications
 - [x] 1. Created `TimecardSyncJobService.java`

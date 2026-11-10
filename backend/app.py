@@ -5,6 +5,7 @@ Provides REST endpoints and serves the modern dashboard frontend.
 import os
 import json
 import threading
+from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -16,10 +17,17 @@ from .database import (
     get_all_corrections, get_latest_sync_status, get_entitlements, get_all_audit_logs,
     clear_all_data, load_archive_vault, ARCHIVE_FILE
 )
-from .mongo_vault import sync_cloud_archive, fetch_cloud_archive
+from .mongo_vault import sync_cloud_archive
 from .scraper import run_timecard_sync, check_auth_status, launch_login_flow, logout_portal_session
 
-app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.2", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -47,11 +55,6 @@ class SyncRequest(BaseModel):
     max_weeks: int = 0  # 0 = All available weeks (8-10 weeks)
     headless: bool = True  # Run completely in background by default
     sync_timeoff: bool = True
-
-
-@app.on_event("startup")
-def startup_event():
-    init_db()
 
 
 @app.get("/api/weeks")

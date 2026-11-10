@@ -905,11 +905,6 @@ function renderAuditHistoryForCurrentWeek() {
   });
 }
 
-// Legacy stub for backward compatibility
-async function loadCorrections() {
-  return [];
-}
-
 let isUserLoggedIn = false;
 
 function updateAuthGateUI(hasSyncedWeeks = false) {

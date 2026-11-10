@@ -288,6 +288,7 @@ public class MainActivity extends Activity {
 
         // Load main application UI
         setupNotificationChannel();
+        TimecardSyncJobService.schedule(this);
         dashboardWebView.loadUrl("https://" + APP_HOST + "/index.html");
         mainHandler.postDelayed(() -> handleNotificationIntent(getIntent()), 900);
         mainHandler.postDelayed(() -> performOtaCheckAndDownload(false), 3500);
@@ -632,8 +633,10 @@ public class MainActivity extends Activity {
                 try (FileOutputStream fos = new FileOutputStream(f, false)) {
                     fos.write("1".getBytes(StandardCharsets.UTF_8));
                 }
-            } else if (f.exists()) {
-                f.delete();
+                TimecardSyncJobService.schedule(this);
+            } else {
+                if (f.exists()) f.delete();
+                TimecardSyncJobService.cancel(this);
             }
         } catch (Exception ignored) {}
     }

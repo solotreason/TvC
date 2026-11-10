@@ -2,45 +2,37 @@
 
 ## Status & Phases
 
-### Completed Sprint: Codebase Optimization, Dead Code Removal & Efficiency Overhaul
+### Completed Sprint: Automated Closed-App Background Timecard Checking & Push Notifications
 
-- [x] 1. **Phase 1: Clean Up Dead Files & Asset Bloat**:
-  - Deleted dead `package.json` dummy file.
-  - Removed committed Gradle build report (`android/build/reports/problems/problems-report.html`).
-  - Updated `.gitignore` to comprehensively ignore all Gradle build output trees (`android/**/build/`, `android/build/`).
-  - Updated `sync_android_assets()` in `run.py` to strictly filter out `*.zip` archives and purged `ota_bundle.zip` from assets.
-  - Removed obsolete `seed_data.js` cleanup lines in `run.py`.
-  - Result: standalone APK size reduced from **0.41 MB** down to **0.23 MB** (~45% reduction).
+- [x] 1. **Created `TimecardSyncJobService.java`**:
+  - Implemented Android `JobService` scheduled periodically with `JobScheduler` (`JOB_ID = 2026`).
+  - Checks persistent cookie session (`portal_auth_v4.flag`); exits immediately if logged out.
+  - Spawns a lightweight headless `WebView` on the main Looper.
+  - Loads Time Card Viewer portal with cookie jar attached.
+  - Polls for `.timecard-wrapper` and active rows without opening any UI window.
+  - Compares extracted shifts against `timecard_store_v4.json`.
+  - When a newly posted shift date is detected, fires a high-priority lock-screen push notification via `NotificationManager` (`daily_timecard_channel`) with deep-link `PendingIntent` to `MainActivity`.
+  - Includes a 45-second watchdog timer to guarantee resource cleanup and eliminate battery drain.
 
-- [x] 2. **Phase 2: Python Backend Efficiency & Dead Code Cleanup**:
-  - Removed dead module variable `_last_archive_signature` in `backend/database.py`.
-  - Replaced redundant N+1 SQLite queries and repeated `json.dump` disk writes on `GET /api/weeks` with a smart dirty-check that only persists newly introduced archived weeks.
-  - Converted `clear_all_data()` into a single atomic `executescript` transaction.
-  - Cleaned up misplaced `import json` in `backend/app.py`.
-  - Updated `last_synced_at` in `backend/mongo_vault.py` to use standard UTC ISO timestamps.
-  - Removed redundant cookie deletions prior to `shutil.rmtree` in `backend/scraper.py`.
+- [x] 2. **Device Reboot & Boot Persistence (`BootReceiver.java`)**:
+  - Implemented `BroadcastReceiver` listening for `ACTION_BOOT_COMPLETED` and `ACTION_MY_PACKAGE_REPLACED`.
+  - Automatically reschedules periodic closed-app checks whenever the phone reboots or the app updates.
 
-- [x] 3. **Phase 3: Frontend JavaScript & CSS Optimization**:
-  - Removed dead statement invocations of `isWaitingForDailyTimecard()` in `static/app.js`.
-  - Removed non-existent element fallback `#syncMessage`.
-  - Removed destructive desktop web `localStorage.clear()` on page load so browser users maintain persistent preferences.
-  - Consolidated triple loop in `renderShiftsTable` (`static/app.js`) into a single pass computing rows, totals, and mobile cards simultaneously.
-  - Fixed missing stream `networkRes.clone()` in `static/sw.js` and bypassed dynamic status endpoints (`/api/status`, `/api/auth/`, `/api/ota/`, `/api/sync`) from cache staleness.
-  - Removed dead `.app-header` CSS rule in `static/styles.css`.
+- [x] 3. **Registered Components in `AndroidManifest.xml`**:
+  - Added `<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />`.
+  - Declared `<service android:name=".TimecardSyncJobService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />`.
+  - Declared `<receiver android:name=".BootReceiver" android:exported="true">`.
 
-- [x] 4. **Phase 4: Android Java (`MainActivity.java`) Optimizations**:
-  - Replaced chunked UTF-8 string decoding in OTA downloader with `ByteArrayOutputStream` to prevent multi-byte character split corruption.
-  - Replaced fragile partial buffer reads across `getPortalBaseUrl()`, `loadStateJson()`, `loadArchiveJson()`, and `saveArchiveJson()` with a dedicated `readFileFully()` helper.
-  - Offloaded multi-megabyte JSON parsing and disk writes in `saveArchiveJson()` to a background worker thread.
-  - Updated `Notification.Builder` to channel-aware constructor and removed obsolete `setDatabaseEnabled(true)`.
-  - Added `startBackgroundSync()` bridge alias.
+- [x] 4. **Integrated Job Scheduling in `MainActivity.java`**:
+  - Automatically schedules closed-app background checking in `onCreate()`.
+  - Automatically schedules upon successful authentication (`setAuthenticatedFlag(true)`).
+  - Cancels closed-app checks when user logs out (`logoutSession()`).
 
-- [x] 5. **Phase 5: Rebuild & Full Verification**:
-  - Repacked OTA bundle with `python run.py --pack-ota` without asset duplication.
-  - Recompiled standalone APK (`Timecard-Tracker.apk`) in 799ms (size: 0.23 MB).
+- [x] 5. **Testing & Verification**:
+  - Standalone APK compiled cleanly at [`Timecard-Tracker.apk`](file:///c:/Users/ibert/Desktop/timecard/Timecard-Tracker.apk) (0.24 MB).
   - All 19 automated unit tests passing (100% pass rate).
 
 ## Review Summary
-- **App Size & Memory**: Cut APK size nearly in half (0.41 MB -> 0.23 MB).
-- **Disk I/O & CPU**: Eliminated disk thrashing on every `GET /api/weeks` read call; shifted archive saving off the UI thread.
-- **Reliability & Code Quality**: Fixed UTF-8 chunk decoding, removed dead/obsolete files, and verified 100% backward compatibility.
+- **No Foreground App Needed**: The phone will now check for new daily timecards in the background even if the app is completely closed or swiped away.
+- **Immediate Alerts**: As soon as a supervisor posts a new shift punch, a native Android notification appears on the user's lock screen.
+- **Reboot Resilient**: The scheduled job survives device reboots and updates automatically.

@@ -15,3 +15,7 @@
 ### 3. Read Endpoint Purity & Disk I/O Bottlenecks
 - **Pattern**: Never perform disk writes (`json.dump`) or repetitive N+1 database queries inside read handlers (e.g. `GET /api/weeks`). Keep read paths pure and cached; restrict disk writes to write/sync mutations only.
 - **Buffer Safety**: In Java/Android, never assume `InputStream.read(byte[])` reads an entire file in a single invocation, and never convert chunked byte buffers to UTF-8 strings mid-stream (which splits multi-byte code points). Always read completely into a `ByteArrayOutputStream` or use character stream readers.
+
+### 4. Dynamic CSS Class Injection in Responsive Grids
+- **Pattern**: When removing or re-ordering responsive navigation buttons (e.g. changing from 5 buttons to 4 buttons in a 2x2 grid), CSS grid span helper classes (such as `col-span-2`) applied dynamically inside JavaScript click handlers will re-introduce an orphan row or blank grid slot every time a user taps any tab.
+- **Rule**: When changing grid column counts or tab hierarchies, always audit the JavaScript tab-switching handler to ensure that no legacy dynamic grid span overrides remain. All items in a balanced 2x2 grid should receive uniform sizing classes.

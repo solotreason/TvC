@@ -1206,8 +1206,8 @@ async function checkSyncStatus() {
 function setupTabs() {
   const tabs = [
     { btnId: 'tabTimeCard', viewId: 'viewTimeCard' },
-    { btnId: 'tabAudit', viewId: 'viewAudit' },
     { btnId: 'tabTimeOff', viewId: 'viewTimeOff' },
+    { btnId: 'tabAudit', viewId: 'viewAudit' },
     { btnId: 'tabArchive', viewId: 'viewArchive' }
   ];
 
@@ -1220,12 +1220,11 @@ function setupTabs() {
         const otherBtn = document.getElementById(t.btnId);
         const otherView = document.getElementById(t.viewId);
         if (!otherBtn || !otherView) return;
-        const extraSpanClass = t.btnId === 'tabArchive' ? 'col-span-2 sm:col-span-1 ' : '';
         if (t.btnId === tab.btnId) {
-          otherBtn.className = `tab-btn ${extraSpanClass}px-3 sm:px-4 py-2 text-xs font-bold rounded border sm:border-0 sm:rounded-t sm:border-b-2 border-[#1e293b] text-[#1e293b] bg-white flex items-center justify-center sm:justify-start gap-1.5 shadow-sm`;
+          otherBtn.className = 'tab-btn px-3 sm:px-4 py-2 text-xs font-bold rounded border sm:border-0 sm:rounded-t sm:border-b-2 border-[#1e293b] text-[#1e293b] bg-white flex items-center justify-center sm:justify-start gap-1.5 shadow-sm';
           otherView.classList.remove('hidden');
         } else {
-          otherBtn.className = `tab-btn ${extraSpanClass}px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5`;
+          otherBtn.className = 'tab-btn px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5';
           otherView.classList.add('hidden');
         }
       });

@@ -75,8 +75,8 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026110801L;
-    private static final String APP_BASE_VERSION = "2.4.1";
+    private static final long APP_BASE_BUILD = 2026110902L;
+    private static final String APP_BASE_VERSION = "2.4.2";
 
     private WebView dashboardWebView;
     private WebView scraperWebView;
@@ -475,34 +475,91 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String fetchJsonWithFailover(String[] urls, int timeoutMs) {
+        for (String urlStr : urls) {
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL(urlStr);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(timeoutMs);
+                conn.setReadTimeout(timeoutMs + 1000);
+                conn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
+                int code = conn.getResponseCode();
+                if (code == 200) {
+                    try (InputStream in = conn.getInputStream();
+                         ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                        byte[] buf = new byte[8192];
+                        int r;
+                        while ((r = in.read(buf)) > 0) {
+                            baos.write(buf, 0, r);
+                        }
+                        return baos.toString("UTF-8");
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (conn != null) {
+                    try { conn.disconnect(); } catch (Exception ignored) {}
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean downloadBundleWithFailover(String[] urls, File destinationFile, int timeoutMs) {
+        for (String urlStr : urls) {
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL(urlStr);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(timeoutMs);
+                conn.setReadTimeout(timeoutMs + 8000);
+                conn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
+                int code = conn.getResponseCode();
+                if (code == 200) {
+                    try (InputStream zin = conn.getInputStream();
+                         FileOutputStream zout = new FileOutputStream(destinationFile, false)) {
+                        byte[] zbuf = new byte[8192];
+                        int zr;
+                        while ((zr = zin.read(zbuf)) > 0) {
+                            zout.write(zbuf, 0, zr);
+                        }
+                    }
+                    if (destinationFile.length() > 500) {
+                        return true;
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (conn != null) {
+                    try { conn.disconnect(); } catch (Exception ignored) {}
+                }
+            }
+        }
+        return false;
+    }
+
     private void performOtaCheckAndDownload(final boolean manual) {
         new Thread(() -> {
             try {
                 String repo = getActiveGitHubRepo();
-                String versionUrl = "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + System.currentTimeMillis();
+                String[] candidateVersionUrls = new String[] {
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/version.json",
+                        "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + System.currentTimeMillis()
+                };
 
-                HttpURLConnection conn = (HttpURLConnection) new URL(versionUrl).openConnection();
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(10000);
-                conn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
-
-                int code = conn.getResponseCode();
-                if (code != 200) {
+                String jsonStr = fetchJsonWithFailover(candidateVersionUrls, 3500);
+                if (jsonStr == null) {
                     if (manual) {
-                        mainHandler.post(() -> Toast.makeText(this, "Could not reach GitHub (HTTP " + code + ")", Toast.LENGTH_SHORT).show());
+                        mainHandler.post(() -> {
+                            Toast.makeText(this, "Could not reach update server", Toast.LENGTH_SHORT).show();
+                            dashboardWebView.evaluateJavascript(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Could not reach update server. Check connection.'});}",
+                                    null
+                            );
+                        });
                     }
                     return;
-                }
-
-                String jsonStr;
-                try (InputStream in = conn.getInputStream();
-                     ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-                    byte[] buf = new byte[8192];
-                    int r;
-                    while ((r = in.read(buf)) > 0) {
-                        baos.write(buf, 0, r);
-                    }
-                    jsonStr = baos.toString("UTF-8");
                 }
 
                 JSONObject remote = new JSONObject(jsonStr);
@@ -529,30 +586,34 @@ public class MainActivity extends Activity {
                 }
 
                 if (manual) {
-                    mainHandler.post(() -> Toast.makeText(this, "Downloading update v" + remoteVersion + "...", Toast.LENGTH_SHORT).show());
-                }
-
-                HttpURLConnection zipConn = (HttpURLConnection) new URL(bundleUrl).openConnection();
-                zipConn.setConnectTimeout(12000);
-                zipConn.setReadTimeout(25000);
-                zipConn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
-
-                int zipCode = zipConn.getResponseCode();
-                if (zipCode != 200) {
-                    if (manual) {
-                        mainHandler.post(() -> Toast.makeText(this, "Failed downloading update bundle (HTTP " + zipCode + ")", Toast.LENGTH_SHORT).show());
-                    }
-                    return;
+                    mainHandler.post(() -> {
+                        Toast.makeText(this, "Downloading update v" + remoteVersion + "...", Toast.LENGTH_SHORT).show();
+                        String js = String.format(
+                                "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({downloading:true,version:%s,build:%d});}",
+                                JSONObject.quote(remoteVersion), remoteBuild
+                        );
+                        dashboardWebView.evaluateJavascript(js, null);
+                    });
                 }
 
                 File zipFile = new File(getFilesDir(), "ota_temp.zip");
-                try (InputStream zin = zipConn.getInputStream();
-                     FileOutputStream zout = new FileOutputStream(zipFile, false)) {
-                    byte[] zbuf = new byte[8192];
-                    int zr;
-                    while ((zr = zin.read(zbuf)) > 0) {
-                        zout.write(zbuf, 0, zr);
+                String[] candidateBundleUrls = new String[] {
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/static/ota_bundle.zip",
+                        bundleUrl
+                };
+
+                boolean downloaded = downloadBundleWithFailover(candidateBundleUrls, zipFile, 8000);
+                if (!downloaded) {
+                    if (manual) {
+                        mainHandler.post(() -> {
+                            Toast.makeText(this, "Failed downloading update package", Toast.LENGTH_SHORT).show();
+                            dashboardWebView.evaluateJavascript(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Failed downloading update package.'});}",
+                                    null
+                            );
+                        });
                     }
+                    return;
                 }
 
                 File stagingDir = new File(getFilesDir(), "ota_staging");
@@ -569,7 +630,13 @@ public class MainActivity extends Activity {
                 if (!new File(validRoot, "index.html").exists() && !new File(validRoot, "app.js").exists()) {
                     deleteDirRecursively(stagingDir);
                     if (manual) {
-                        mainHandler.post(() -> Toast.makeText(this, "Invalid update package", Toast.LENGTH_SHORT).show());
+                        mainHandler.post(() -> {
+                            Toast.makeText(this, "Invalid update package", Toast.LENGTH_SHORT).show();
+                            dashboardWebView.evaluateJavascript(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Invalid update package format.'});}",
+                                    null
+                            );
+                        });
                     }
                     return;
                 }
@@ -605,8 +672,10 @@ public class MainActivity extends Activity {
 
                 mainHandler.post(() -> {
                     String js = String.format(
-                            "if(window.TimecardBridge && window.TimecardBridge.onOtaUpdateReady){window.TimecardBridge.onOtaUpdateReady({version:%s,build:%d,notes:%s});}",
-                            JSONObject.quote(remoteVersion), remoteBuild, JSONObject.quote(releaseNotes)
+                            "if(window.TimecardBridge && window.TimecardBridge.onOtaUpdateReady){window.TimecardBridge.onOtaUpdateReady({version:%s,build:%d,notes:%s});}" +
+                            "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({update_installed:true,version:%s,build:%d});}",
+                            JSONObject.quote(remoteVersion), remoteBuild, JSONObject.quote(releaseNotes),
+                            JSONObject.quote(remoteVersion), remoteBuild
                     );
                     dashboardWebView.evaluateJavascript(js, null);
                     Toast.makeText(this, "Update v" + remoteVersion + " ready! Tap reload to apply.", Toast.LENGTH_LONG).show();
@@ -614,7 +683,14 @@ public class MainActivity extends Activity {
 
             } catch (Exception e) {
                 if (manual) {
-                    mainHandler.post(() -> Toast.makeText(this, "Update check failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+                    mainHandler.post(() -> {
+                        Toast.makeText(this, "Update check failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                        String js = String.format(
+                                "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:%s});}",
+                                JSONObject.quote("Update check failed: " + (e.getMessage() != null ? e.getMessage() : "Network error"))
+                        );
+                        dashboardWebView.evaluateJavascript(js, null);
+                    });
                 }
             }
         }).start();

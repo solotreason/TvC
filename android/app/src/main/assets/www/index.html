@@ -270,16 +270,8 @@
           class="hidden text-[10px] bg-[#dc3545] text-white font-bold px-1.5 py-0.2 rounded-full">0</span>
       </button>
 
-      <button id="tabCorrections"
-        class="tab-btn px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5">
-        <i class="fa-solid fa-clock-rotate-left text-[#f59e0b]"></i>
-        <span>Corrections</span>
-        <span id="correctionsBadge"
-          class="hidden text-[10px] bg-[#f59e0b] text-[#1e293b] font-bold px-1.5 py-0.2 rounded-full">0</span>
-      </button>
-
       <button id="tabArchive"
-        class="tab-btn col-span-2 sm:col-span-1 px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5">
+        class="tab-btn px-3 sm:px-4 py-2 text-xs font-semibold rounded border sm:border-0 border-[#dee2e6] sm:rounded-t text-[#6c757d] hover:text-[#212529] bg-white/60 sm:bg-transparent hover:bg-white flex items-center justify-center sm:justify-start gap-1.5">
         <i class="fa-solid fa-box-archive text-[#198754]"></i>
         <span>Archive</span>
         <span id="archiveBadge"
@@ -397,41 +389,7 @@
       </div>
     </section>
 
-    <!-- TAB 4: Corrections Viewer -->
-    <section id="viewCorrections" class="hidden space-y-4">
-      <div class="bg-white border border-[#dee2e6] rounded-lg p-4 sm:p-5 shadow-sm space-y-3">
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-[#dee2e6] gap-2">
-          <div>
-            <h3 class="text-base font-bold text-[#1e293b]">Corrections Viewer</h3>
-            <p class="text-xs text-[#6c757d] mt-0.5">Historical log of recorded timecard adjustments.</p>
-          </div>
-        </div>
-
-        <div class="overflow-x-auto border border-[#dee2e6] rounded">
-          <table class="w-full text-left text-xs table-bordered">
-            <thead>
-              <tr>
-                <th>Timestamp</th>
-                <th>Type</th>
-                <th>Action</th>
-                <th>Item</th>
-                <th>Old</th>
-                <th>New</th>
-                <th>Edited By</th>
-                <th>Reason</th>
-              </tr>
-            </thead>
-            <tbody id="correctionsTableBody" class="divide-y divide-[#dee2e6]">
-              <tr>
-                <td colspan="8" class="p-6 text-center text-[#6c757d]">No corrections found.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- TAB 5: Historical Archive (Weeks Older Than 8 Active Weeks, Grouped by Month) -->
+  <!-- TAB 4: Historical Archive (Weeks Older Than 8 Active Weeks, Grouped by Month) -->
     <section id="viewArchive" class="hidden space-y-4">
       <div class="bg-white border border-[#dee2e6] rounded-lg p-4 sm:p-5 shadow-sm space-y-3.5">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-[#dee2e6] gap-3">
@@ -444,7 +402,7 @@
               </span>
             </h3>
             <p class="text-xs text-[#6c757d] mt-0.5">
-              Active weeks are capped at the <b>8 most recent weeks</b>. All older weeks, punch audits, and corrections are permanently locked in your local &amp; cloud database vault so they are never lost.
+              Active weeks are capped at the <b>8 most recent weeks</b>. All older weeks and punch audits are permanently locked in your local &amp; cloud database vault so they are never lost.
             </p>
           </div>
 

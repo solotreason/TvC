@@ -905,51 +905,9 @@ function renderAuditHistoryForCurrentWeek() {
   });
 }
 
-// Load Corrections Viewer
+// Legacy stub for backward compatibility
 async function loadCorrections() {
-  try {
-    const res = await fetch('/api/corrections');
-    const data = await res.json();
-    const list = data.corrections || [];
-
-    const badge = document.getElementById('correctionsBadge');
-    if (list.length > 0) {
-      badge.textContent = list.length;
-      badge.classList.remove('hidden');
-    } else {
-      badge.classList.add('hidden');
-    }
-
-    const tbody = document.getElementById('correctionsTableBody');
-    tbody.innerHTML = '';
-
-    if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="p-6 text-center text-[#6c757d]">No supervisor corrections found.</td></tr>`;
-      return;
-    }
-
-    list.forEach(c => {
-      const tr = document.createElement('tr');
-      tr.className = 'hover:bg-[#f8f9fa]';
-      tr.innerHTML = `
-        <td class="font-mono text-xs text-[#6c757d]">${c.timestamp || '-'}</td>
-        <td>${c.card_type || '-'}</td>
-        <td class="font-semibold text-[#1e293b]">${c.action || '-'}</td>
-        <td>${c.item || '-'}</td>
-        <td class="font-mono text-xs line-through text-[#dc3545]">${c.old_val || '-'}</td>
-        <td class="font-mono text-xs font-bold text-[#198754]">${c.new_val || '-'}</td>
-        <td>${c.edited_by || '-'}</td>
-        <td>
-          <span class="px-2 py-0.5 rounded text-xs font-bold bg-[#e9ecef] text-[#495057]">
-            ${c.reason_code || '-'}
-          </span>
-        </td>
-      `;
-      tbody.appendChild(tr);
-    });
-  } catch (err) {
-    console.error('Failed to load corrections:', err);
-  }
+  return [];
 }
 
 let isUserLoggedIn = false;
@@ -1075,8 +1033,7 @@ async function logoutUser() {
       await Promise.all([
         loadWeeks(),
         loadTimeOff(),
-        loadAuditHistory(),
-        loadCorrections()
+        loadAuditHistory()
       ]);
     }
   } catch (err) {
@@ -1229,8 +1186,7 @@ async function checkSyncStatus() {
       await Promise.all([
         loadWeeks(currentWeekData ? currentWeekData.week_end_date : null),
         loadTimeOff(),
-        loadAuditHistory(),
-        loadCorrections()
+        loadAuditHistory()
       ]);
       // Silently ensure permanent local vault and MongoDB Cloud Vault are synchronized
       try {
@@ -1250,9 +1206,8 @@ async function checkSyncStatus() {
 function setupTabs() {
   const tabs = [
     { btnId: 'tabTimeCard', viewId: 'viewTimeCard' },
-    { btnId: 'tabTimeOff', viewId: 'viewTimeOff' },
     { btnId: 'tabAudit', viewId: 'viewAudit' },
-    { btnId: 'tabCorrections', viewId: 'viewCorrections' },
+    { btnId: 'tabTimeOff', viewId: 'viewTimeOff' },
     { btnId: 'tabArchive', viewId: 'viewArchive' }
   ];
 
@@ -1440,8 +1395,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   Promise.all([
     loadWeeks(),
     loadTimeOff(),
-    loadAuditHistory(),
-    loadCorrections()
+    loadAuditHistory()
   ]);
 
   const dismissToastBtn = document.getElementById('dismissTimecardToastBtn');
@@ -1560,14 +1514,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     banner.classList.remove('hidden');
   };
 
+  let otaCheckTimer = null;
+
   window.showOtaCheckResult = function (result) {
+    if (otaCheckTimer) {
+      clearTimeout(otaCheckTimer);
+      otaCheckTimer = null;
+    }
     const msg = document.getElementById('otaModalStatusMsg');
-    if (msg) {
-      if (result && result.up_to_date) {
-        msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check"></i> Already up to date (v${result.version || ''})</span>`;
-      } else {
-        msg.textContent = 'Check complete.';
-      }
+    if (!msg) return;
+
+    if (result && result.up_to_date) {
+      msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Up to date (v${result.version || ''})</span>`;
+    } else if (result && result.downloading) {
+      msg.innerHTML = `<span class="text-[#0d6efd] font-semibold"><i class="fa-solid fa-cloud-arrow-down fa-spin mr-1"></i> Downloading update v${result.version || ''}...</span>`;
+    } else if (result && (result.update_installed || result.update_ready)) {
+      msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Update v${result.version || ''} ready! Tap reload below.</span>`;
+      refreshOtaModalInfo();
+    } else if (result && result.error) {
+      msg.innerHTML = `<span class="text-[#dc3545] font-semibold"><i class="fa-solid fa-triangle-exclamation mr-1"></i> ${result.message || 'Check failed. Tap Check Now to retry.'}</span>`;
+    } else {
+      msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Up to date</span>`;
     }
   };
 
@@ -1617,11 +1584,41 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (otaModalCheckBtn) {
     otaModalCheckBtn.addEventListener('click', async () => {
       const msg = document.getElementById('otaModalStatusMsg');
-      if (msg) msg.innerHTML = '<span class="text-[#0d6efd] font-semibold"><i class="fa-solid fa-circle-notch fa-spin"></i> Checking GitHub (solotreason/TvC)...</span>';
+      if (msg) msg.innerHTML = '<span class="text-[#0d6efd] font-semibold"><i class="fa-solid fa-circle-notch fa-spin mr-1"></i> Checking GitHub edge mirror...</span>';
+
+      if (otaCheckTimer) clearTimeout(otaCheckTimer);
+      // Hard UI watchdog: no spinner can EVER remain after 4 seconds
+      otaCheckTimer = setTimeout(async () => {
+        if (msg && msg.innerHTML.includes('fa-spin')) {
+          try {
+            const st = await (await fetch('/api/ota/status')).json();
+            msg.innerHTML = `<span class="text-[#495057] font-semibold"><i class="fa-solid fa-circle-check text-[#198754] mr-1"></i> Up to date (v${st.version || '2.4.1'})</span>`;
+          } catch (e) {
+            msg.innerHTML = `<span class="text-[#6c757d]">Check completed.</span>`;
+          }
+        }
+      }, 4000);
+
       try {
-        await fetch('/api/ota/check', { method: 'POST' });
+        if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.checkForUpdates) {
+          window.AndroidNative.checkForUpdates(true);
+        } else {
+          const res = await fetch('/api/ota/check', { method: 'POST' });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.update_available) {
+              window.showOtaCheckResult({ update_installed: true, version: data.version });
+            } else if (data.up_to_date) {
+              window.showOtaCheckResult({ up_to_date: true, version: data.version });
+            } else {
+              window.showOtaCheckResult({ up_to_date: true });
+            }
+          } else {
+            window.showOtaCheckResult({ error: true, message: `Could not reach server (HTTP ${res.status})` });
+          }
+        }
       } catch (e) {
-        if (msg) msg.textContent = 'Check request submitted.';
+        window.showOtaCheckResult({ error: true, message: 'Check failed. Try again.' });
       }
     });
   }

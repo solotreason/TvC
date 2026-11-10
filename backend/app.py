@@ -381,8 +381,8 @@ def get_ota_status():
         except Exception:
             pass
     return {
-        "version": "2.4.1",
-        "build": 2026110802,
+        "version": "2.4.2",
+        "build": 2026110902,
         "github_repo": "solotreason/TvC",
         "release_notes": "OTA Live Update Active"
     }
@@ -390,7 +390,39 @@ def get_ota_status():
 
 @app.post("/api/ota/check")
 def check_ota_updates():
-    return {"status": "OK", "message": "Checked for updates"}
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://cdn.jsdelivr.net/gh/solotreason/TvC@main/version.json",
+            headers={"User-Agent": "TvC-Web/2.4.2"}
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            remote = json.loads(resp.read().decode("utf-8"))
+            local_meta = get_ota_status()
+            remote_build = int(remote.get("build", 0))
+            local_build = int(local_meta.get("build", 0))
+            if remote_build > local_build:
+                return {
+                    "status": "OK",
+                    "update_available": True,
+                    "version": remote.get("version"),
+                    "build": remote_build,
+                    "notes": remote.get("release_notes", "")
+                }
+            return {
+                "status": "OK",
+                "up_to_date": True,
+                "version": local_meta.get("version", "2.4.2"),
+                "build": local_build
+            }
+    except Exception:
+        local_meta = get_ota_status()
+        return {
+            "status": "OK",
+            "up_to_date": True,
+            "version": local_meta.get("version", "2.4.2"),
+            "build": int(local_meta.get("build", 0))
+        }
 
 
 @app.get("/sw.js")

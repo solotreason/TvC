@@ -1,8 +1,8 @@
 {
-  "version": "2.4.1",
-  "build": 2026110901,
+  "version": "2.4.2",
+  "build": 2026110904,
   "min_apk_version": 1,
-  "release_notes": "Enabled GitHub Over-The-Air (OTA) live updates & silent background scraper stabilization",
+  "release_notes": "Streamlined 4-tab mobile navigation and instantaneous edge CDN live update checking",
   "github_repo": "solotreason/TvC",
   "ota_bundle_url": "https://raw.githubusercontent.com/solotreason/TvC/main/static/ota_bundle.zip",
   "apk_url": "https://github.com/solotreason/TvC/releases/latest/download/Timecard-Tracker.apk"

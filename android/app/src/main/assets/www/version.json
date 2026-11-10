@@ -1,6 +1,6 @@
 {
   "version": "2.4.1",
-  "build": 2026110806,
+  "build": 2026110901,
   "min_apk_version": 1,
   "release_notes": "Enabled GitHub Over-The-Air (OTA) live updates & silent background scraper stabilization",
   "github_repo": "solotreason/TvC",

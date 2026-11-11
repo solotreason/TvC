@@ -1,6 +1,6 @@
 {
   "version": "2.4.4",
-  "build": 2026111004,
+  "build": 2026111005,
   "min_apk_version": 1,
   "release_notes": "Battery-smart closed-app sync with adaptive throttling and unchanged-page skip",
   "github_repo": "solotreason/TvC",

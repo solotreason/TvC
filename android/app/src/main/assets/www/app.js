@@ -51,6 +51,60 @@ function isWaitingForDailyTimecard() {
   return !todayComplete;
 }
 
+function getInitialSmartCheckTimestamp() {
+  try {
+    if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.getStoreLastModified === 'function') {
+      const mtime = Number(window.AndroidNative.getStoreLastModified()) || 0;
+      if (mtime > 0) return mtime;
+    }
+  } catch (e) {}
+  return 0;
+}
+
+function refreshBatteryOptimizationNotice() {
+  const banner = document.getElementById('batteryOptNotice');
+  if (!banner) return;
+  try {
+    const canCheck = typeof window.AndroidNative !== 'undefined'
+      && typeof window.AndroidNative.isIgnoringBatteryOptimizations === 'function';
+    if (!canCheck || !isUserLoggedIn) {
+      banner.classList.add('hidden');
+      return;
+    }
+    if (window.AndroidNative.isIgnoringBatteryOptimizations()) {
+      banner.classList.add('hidden');
+    } else {
+      banner.classList.remove('hidden');
+    }
+  } catch (e) {
+    banner.classList.add('hidden');
+  }
+}
+
+window.refreshDashboardFromStore = async function () {
+  weekDetailsCache.clear();
+  await checkAuthStatus();
+  await Promise.all([
+    loadWeeks(currentWeekData ? currentWeekData.week_end_date : null),
+    loadTimeOff(),
+    loadAuditHistory()
+  ]);
+  refreshBatteryOptimizationNotice();
+};
+
+async function syncFromNativeDiskIfUpdated() {
+  try {
+    if (window.TimecardBridge && typeof window.TimecardBridge.reloadFromDiskIfUpdated === 'function') {
+      if (window.TimecardBridge.reloadFromDiskIfUpdated()) {
+        lastSmartCheckAt = Math.max(lastSmartCheckAt, getInitialSmartCheckTimestamp() || Date.now());
+        await window.refreshDashboardFromStore();
+        return true;
+      }
+    }
+  } catch (e) {}
+  return false;
+}
+
 function runSmartAutoCheckIfNeeded(minGapMs = SMART_CHECK_INTERVAL_MS) {
   if (!isUserLoggedIn || pollStatusInterval !== null) return;
   if (!isWaitingForDailyTimecard()) return;
@@ -62,19 +116,23 @@ function runSmartAutoCheckIfNeeded(minGapMs = SMART_CHECK_INTERVAL_MS) {
 }
 
 function setupSmartAutoCheck() {
-  lastSmartCheckAt = Date.now();
+  lastSmartCheckAt = getInitialSmartCheckTimestamp();
   if (smartCheckTimer) clearInterval(smartCheckTimer);
   smartCheckTimer = setInterval(() => {
     runSmartAutoCheckIfNeeded(SMART_CHECK_INTERVAL_MS - 5000);
   }, 60 * 1000); // Lightweight 60s tick that checks elapsed time & sleep condition
 
-  document.addEventListener('visibilitychange', () => {
+  document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'visible') {
+      await syncFromNativeDiskIfUpdated();
+      refreshBatteryOptimizationNotice();
       runSmartAutoCheckIfNeeded(SMART_RESUME_MIN_GAP_MS);
     }
   });
 
-  window.onAppResumedSmartCheck = function () {
+  window.onAppResumedSmartCheck = async function () {
+    await syncFromNativeDiskIfUpdated();
+    refreshBatteryOptimizationNotice();
     runSmartAutoCheckIfNeeded(SMART_RESUME_MIN_GAP_MS);
   };
 }
@@ -934,6 +992,7 @@ function updateAuthGateUI(hasSyncedWeeks = false) {
     weekSelectContainer.classList.toggle('hidden', !showDashboard);
     weekSelectContainer.classList.toggle('flex', showDashboard);
   }
+  refreshBatteryOptimizationNotice();
 }
 
 // Check active authentication status with portal
@@ -1397,11 +1456,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupPullToRefresh();
   setupSmartAutoCheck();
   await checkAuthStatus();
+  refreshBatteryOptimizationNotice();
   Promise.all([
     loadWeeks(),
     loadTimeOff(),
     loadAuditHistory()
   ]).catch(err => console.error('Initial load error:', err));
+
+  const batteryBanner = document.getElementById('batteryOptNotice');
+  if (batteryBanner) {
+    batteryBanner.addEventListener('click', () => {
+      try {
+        if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.requestIgnoreBatteryOptimizations === 'function') {
+          window.AndroidNative.requestIgnoreBatteryOptimizations();
+        }
+      } catch (e) {}
+    });
+  }
 
   const dismissToastBtn = document.getElementById('dismissTimecardToastBtn');
   if (dismissToastBtn) {

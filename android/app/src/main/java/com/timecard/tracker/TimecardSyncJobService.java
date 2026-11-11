@@ -1,66 +1,95 @@
 package com.timecard.tracker;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
+import android.annotation.SuppressLint;
 import android.app.job.JobInfo;
 import android.app.job.JobParameters;
 import android.app.job.JobScheduler;
 import android.app.job.JobService;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.json.JSONTokener;
 
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
- * Closed-App Background Service that periodically checks for new daily timecards
- * and punch updates via Android JobScheduler, firing push notifications even when
- * the app is completely closed or device was rebooted.
+ * Closed-app periodic JobService that scrapes updated timecard HTML in the background,
+ * invokes the shared android_bridge.js parser/storage engine to persist full shift,
+ * breakdown, weekly pay, audit, and archive data to disk, and posts native notifications.
  */
 public class TimecardSyncJobService extends JobService {
 
     public static final int JOB_ID = 2026;
-    private static final String NOTIFICATION_CHANNEL_ID = "daily_timecard_channel";
-    private static final String STORE_FILENAME = "timecard_store_v4.json";
-    private static final String AUTH_MARKER_FILENAME = "portal_auth_v4.flag";
-    private static final String PORTAL_CFG_FILENAME = "portal_config.json";
-    private static final String DEFAULT_TIMECARD_PATH = "/us/en/tools-and-resources/pay-and-benefits/time-card-viewer.html";
+
+    private static final String PREF_LAST_BG_SYNC_MS = "last_bg_sync_ms";
+    private static final String PREF_NOTIFIED_SIGNATURES = "notified_shift_signatures_v2";
+    private static final long PERIODIC_INTERVAL_MS = 15 * 60 * 1000L;
+    private static final long PERIODIC_FLEX_MS = 5 * 60 * 1000L;
+    private static final long WATCHDOG_TIMEOUT_MS = 55_000L;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WebView headlessWebView;
+    private WebView bridgeWebView;
     private boolean isFinished = false;
+    private boolean bridgeIngestStarted = false;
+    private int interactiveLoginHits = 0;
+    private Runnable watchdogRunnable;
 
+    private String preStoreJson = "";
+    private final List<CapturedWeek> capturedWeeks = new ArrayList<>();
+    private final Set<String> capturedWeekKeys = new HashSet<>();
+
+    private static final class CapturedWeek {
+        final String weekEndDate;
+        final String rawHtml;
+
+        CapturedWeek(String weekEndDate, String rawHtml) {
+            this.weekEndDate = weekEndDate;
+            this.rawHtml = rawHtml;
+        }
+    }
+
+    /** Schedules periodic closed-app checks without resetting an already-active job timer. */
     public static void schedule(Context context) {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler == null) return;
 
-        ComponentName serviceComponent = new ComponentName(context, TimecardSyncJobService.class);
-        JobInfo.Builder builder = new JobInfo.Builder(JOB_ID, serviceComponent)
-                .setPeriodic(15 * 60 * 1000L, 5 * 60 * 1000L) // 15-minute periodic interval
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPersisted(true);
+        JobInfo pending = scheduler.getPendingJob(JOB_ID);
+        if (pending != null && pending.isPeriodic()) {
+            return;
+        }
 
-        scheduler.schedule(builder.build());
+        ComponentName serviceComponent = new ComponentName(context, TimecardSyncJobService.class);
+        JobInfo jobInfo = new JobInfo.Builder(JOB_ID, serviceComponent)
+                .setPeriodic(PERIODIC_INTERVAL_MS, PERIODIC_FLEX_MS)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setPersisted(true)
+                .build();
+
+        scheduler.schedule(jobInfo);
     }
 
+    /** Cancels scheduled closed-app background checks. */
     public static void cancel(Context context) {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler != null) {
@@ -69,36 +98,39 @@ public class TimecardSyncJobService extends JobService {
     }
 
     @Override
-    public boolean onStartJob(JobParameters params) {
-        isFinished = false;
-
-        // Skip background sync if user has logged out
-        File authFlag = new File(getFilesDir(), AUTH_MARKER_FILENAME);
-        if (!authFlag.exists()) {
+    public boolean onStartJob(final JobParameters params) {
+        if (!PortalHelper.checkCookiesLoggedIn(this)) {
             return false;
         }
 
+        isFinished = false;
+        bridgeIngestStarted = false;
+        interactiveLoginHits = 0;
+        capturedWeeks.clear();
+        capturedWeekKeys.clear();
+        preStoreJson = PortalHelper.readFileString(this, PortalHelper.STORE_FILENAME);
+
+        watchdogRunnable = () -> finishJobCleanly(params, false);
+        mainHandler.postDelayed(watchdogRunnable, WATCHDOG_TIMEOUT_MS);
+
         mainHandler.post(() -> runHeadlessCheck(params));
-        return true; // Asynchronous work running
+        return true;
     }
 
     @Override
     public boolean onStopJob(JobParameters params) {
-        cleanupWebView();
+        cancelWatchdog();
         isFinished = true;
-        return true; // Reschedule on abort
+        cleanupWebViews();
+        return true;
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
     private void runHeadlessCheck(final JobParameters params) {
+        if (isFinished) return;
         try {
-            headlessWebView = new WebView(getApplicationContext());
-            WebSettings settings = headlessWebView.getSettings();
-            settings.setJavaScriptEnabled(true);
-            settings.setDomStorageEnabled(true);
-            settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-            settings.setUserAgentString(
-                    "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-            );
+            headlessWebView = new WebView(this);
+            PortalHelper.setupWebViewDefaults(headlessWebView);
 
             CookieManager cm = CookieManager.getInstance();
             cm.setAcceptCookie(true);
@@ -106,243 +138,593 @@ public class TimecardSyncJobService extends JobService {
 
             headlessWebView.setWebViewClient(new WebViewClient() {
                 @Override
+                public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                    if (request != null && request.getUrl() != null
+                            && PortalHelper.isBlockedBackgroundAsset(request.getUrl().toString())) {
+                        return PortalHelper.emptyAssetResponse();
+                    }
+                    return super.shouldInterceptRequest(view, request);
+                }
+
+                @Override
                 public void onPageFinished(WebView view, String url) {
                     super.onPageFinished(view, url);
-                    startPolling(params, 0);
+                    CookieManager.getInstance().flush();
+                    PortalHelper.injectMicrosoftSecurityBypass(TimecardSyncJobService.this, view);
                 }
             });
 
-            // 45-second watchdog to guarantee termination and protect battery
-            mainHandler.postDelayed(() -> {
-                if (!isFinished) {
-                    finishJobCleanly(params, false);
-                }
-            }, 45000);
-
-            headlessWebView.loadUrl(getPortalTimecardUrl());
-
+            headlessWebView.loadUrl(PortalHelper.getTimecardPortalUrl(this));
+            mainHandler.postDelayed(() -> pollPortalReady(params, 0), 1200);
         } catch (Exception e) {
             finishJobCleanly(params, false);
         }
     }
 
-    private void startPolling(final JobParameters params, final int attempt) {
+    private void pollPortalReady(final JobParameters params, final int attempt) {
         if (isFinished || headlessWebView == null) return;
-        if (attempt > 30) {
+        if (attempt > 45) {
             finishJobCleanly(params, false);
             return;
         }
 
         String checkJs = "(function(){" +
-                "  var w = document.querySelector('.timecard-wrapper');" +
-                "  if (!w) return JSON.stringify({ready: false});" +
-                "  var loader = document.querySelector('#tcvLoader');" +
-                "  var loaderVis = loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none';" +
-                "  var rows = document.querySelectorAll('tr.timecard-card');" +
-                "  if (loaderVis || rows.length === 0) return JSON.stringify({ready: false});" +
-                "  var shifts = [];" +
-                "  for (var i = 0; i < rows.length; i++) {" +
-                "    var r = rows[i];" +
-                "    var d = r.getAttribute('data-date') || '';" +
-                "    if (!d) {" +
-                "      var dEl = r.querySelector('.day-date, .shift-date');" +
-                "      d = dEl ? dEl.innerText.trim() : '';" +
+                "  try {" +
+                "    var loginEl = document.querySelector('input[type=\"password\"], #i0116, #idRichContext_DisplaySign, #idTxtBx_SAOTCC_OTC');" +
+                "    var kmsiEl = document.querySelector('#idSIButton9, #btnAskLater, #skipLink');" +
+                "    var interactiveLogin = !!(loginEl && loginEl.offsetParent !== null && !(kmsiEl && kmsiEl.offsetParent !== null));" +
+                "    var w = document.querySelector('.timecard-wrapper');" +
+                "    var loader = document.querySelector('#tcvLoader');" +
+                "    var loaderVis = !!(loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none');" +
+                "    var rows = document.querySelectorAll('tr.timecard-card');" +
+                "    if (!w || loaderVis || rows.length === 0) {" +
+                "      return JSON.stringify({ready: false, interactiveLogin: interactiveLogin});" +
                 "    }" +
-                "    var hEl = r.querySelector('.total-hours, td:nth-child(7)');" +
-                "    var h = hEl ? hEl.innerText.trim() : '0.00';" +
-                "    if (d) shifts.push({date: d, hours: h});" +
-                "  }" +
-                "  var sel = document.querySelector('.timecard-date-dropdown select');" +
-                "  var wed = sel && sel.value ? sel.value.trim() : '';" +
-                "  return JSON.stringify({ready: true, shifts: shifts, week_end_date: wed});" +
+                "    var sel = document.querySelector('.timecard-date-dropdown select');" +
+                "    var selectedWeek = sel && sel.value ? sel.value.trim() : '';" +
+                "    var opts = [];" +
+                "    if (sel) {" +
+                "      for (var i = 0; i < sel.options.length; i++) {" +
+                "        var v = (sel.options[i].value || '').trim();" +
+                "        if (v) opts.push(v);" +
+                "      }" +
+                "    }" +
+                "    return JSON.stringify({ready: true, selectedWeek: selectedWeek, weekOptions: opts});" +
+                "  } catch(e) { return JSON.stringify({ready: false}); }" +
                 "})();";
 
-        headlessWebView.evaluateJavascript(checkJs, resultJson -> {
+        headlessWebView.evaluateJavascript(checkJs, raw -> {
+            if (isFinished) return;
             try {
-                if (resultJson != null && !resultJson.equals("null")) {
-                    String clean = resultJson.startsWith("\"") && resultJson.endsWith("\"")
-                            ? new JSONObject("{\"res\":" + resultJson + "}").getString("res")
-                            : resultJson;
+                JSONObject res = new JSONObject(unquoteJsString(raw));
+                if (res.optBoolean("ready", false)) {
+                    interactiveLoginHits = 0;
+                    PortalHelper.setAuthenticatedFlag(TimecardSyncJobService.this, true);
+                    String selectedWeek = res.optString("selectedWeek", "");
+                    List<String> weekOptions = jsonArrayToList(res.optJSONArray("weekOptions"));
+                    expandAccordionsAndCapture(params, selectedWeek, weekOptions, false);
+                    return;
+                }
 
-                    JSONObject res = new JSONObject(clean);
-                    if (res.optBoolean("ready", false)) {
-                        handleExtractedShifts(res);
+                if (res.optBoolean("interactiveLogin", false)) {
+                    interactiveLoginHits++;
+                    if (interactiveLoginHits >= 5) {
                         finishJobCleanly(params, false);
+                        return;
+                    }
+                } else {
+                    interactiveLoginHits = 0;
+                }
+            } catch (Exception ignored) {}
+
+            mainHandler.postDelayed(() -> pollPortalReady(params, attempt + 1), 800);
+        });
+    }
+
+    private void expandAccordionsAndCapture(
+            final JobParameters params,
+            final String expectedWeek,
+            final List<String> weekOptions,
+            final boolean isRolloverFollowup
+    ) {
+        if (isFinished || headlessWebView == null) return;
+
+        String expandJs = "(function(){" +
+                "  try {" +
+                "    var listBtn = document.querySelector('.list-view');" +
+                "    if (listBtn && !listBtn.classList.contains('active')) listBtn.click();" +
+                "    var rows = document.querySelectorAll('tr.timecard-card');" +
+                "    for (var i = 0; i < rows.length; i++) {" +
+                "      if (!rows[i].classList.contains('activeRow')) rows[i].click();" +
+                "    }" +
+                "  } catch(e) {}" +
+                "  return 'EXPANDED';" +
+                "})();";
+
+        headlessWebView.evaluateJavascript(expandJs, ignored -> {
+            if (isFinished) return;
+            mainHandler.postDelayed(() -> captureCurrentDom(params, expectedWeek, weekOptions, isRolloverFollowup), 550);
+        });
+    }
+
+    private void captureCurrentDom(
+            final JobParameters params,
+            final String expectedWeek,
+            final List<String> weekOptions,
+            final boolean isRolloverFollowup
+    ) {
+        if (isFinished || headlessWebView == null) return;
+
+        String grabJs = "(function(){" +
+                "  var sel = document.querySelector('.timecard-date-dropdown select');" +
+                "  var wed = sel && sel.value ? sel.value.trim() : '';" +
+                "  return JSON.stringify({weekEnd: wed, html: document.documentElement.outerHTML});" +
+                "})();";
+
+        headlessWebView.evaluateJavascript(grabJs, raw -> {
+            if (isFinished) return;
+            try {
+                JSONObject obj = new JSONObject(unquoteJsString(raw));
+                String html = obj.optString("html", "");
+                String wed = obj.optString("weekEnd", expectedWeek != null ? expectedWeek : "");
+                if (!html.isEmpty() && !capturedWeekKeys.contains(wed)) {
+                    capturedWeekKeys.add(wed);
+                    capturedWeeks.add(new CapturedWeek(wed, html));
+                }
+
+                // On week rollover (e.g., Sunday morning), also catch updates in the previous non-finalized week
+                if (!isRolloverFollowup && weekOptions != null && weekOptions.size() >= 2) {
+                    String prevWeek = weekOptions.get(1);
+                    if (!prevWeek.isEmpty() && !capturedWeekKeys.contains(prevWeek) && isWeekNeedingRolloverCheck(prevWeek)) {
+                        selectDropdownWeekAndCapture(params, prevWeek, weekOptions);
                         return;
                     }
                 }
             } catch (Exception ignored) {}
 
-            mainHandler.postDelayed(() -> startPolling(params, attempt + 1), 1000);
+            if (capturedWeeks.isEmpty()) {
+                finishJobCleanly(params, false);
+            } else {
+                ingestCapturedWeeksWithBridge(params);
+            }
         });
     }
 
-    private void handleExtractedShifts(JSONObject res) {
+    private boolean isWeekNeedingRolloverCheck(String weekEndDate) {
+        if (preStoreJson == null || preStoreJson.trim().isEmpty()) return false;
         try {
-            JSONArray newShifts = res.optJSONArray("shifts");
-            String weekEndDate = res.optString("week_end_date", "");
-            if (newShifts == null || newShifts.length() == 0) return;
-
-            File storeFile = new File(getFilesDir(), STORE_FILENAME);
-            Set<String> knownDates = new HashSet<>();
-
-            JSONObject storeObj = null;
-            if (storeFile.exists()) {
-                byte[] b = readFileFully(storeFile);
-                if (b.length > 0) {
-                    storeObj = new JSONObject(new String(b, StandardCharsets.UTF_8));
-                    JSONArray weeks = storeObj.optJSONArray("weeks");
-                    if (weeks != null && weeks.length() > 0) {
-                        JSONObject latestWeek = weeks.getJSONObject(0);
-                        JSONArray existingShifts = latestWeek.optJSONArray("shifts");
-                        if (existingShifts != null) {
-                            for (int i = 0; i < existingShifts.length(); i++) {
-                                JSONObject s = existingShifts.getJSONObject(i);
-                                String d = s.optString("date", "");
-                                if (!d.isEmpty()) knownDates.add(d);
-                            }
-                        }
-                    }
+            JSONObject store = new JSONObject(preStoreJson);
+            JSONArray weeks = store.optJSONArray("weeks");
+            if (weeks == null) return false;
+            for (int i = 0; i < weeks.length(); i++) {
+                JSONObject w = weeks.optJSONObject(i);
+                if (w != null && weekEndDate.equals(w.optString("week_end_date", ""))) {
+                    return !"Finalized".equalsIgnoreCase(w.optString("status", ""));
                 }
             }
+        } catch (Exception ignored) {}
+        return false;
+    }
 
-            // Detect newly posted shift dates
-            boolean hasNewShifts = false;
-            for (int j = 0; j < newShifts.length(); j++) {
-                JSONObject s = newShifts.getJSONObject(j);
-                String shiftDate = s.optString("date", "");
-                String hours = s.optString("hours", "0.00");
+    private void selectDropdownWeekAndCapture(
+            final JobParameters params,
+            final String targetWeek,
+            final List<String> weekOptions
+    ) {
+        if (isFinished || headlessWebView == null) return;
+        String selectJs = "(function(target){" +
+                "  var sel = document.querySelector('.timecard-date-dropdown select');" +
+                "  if (!sel) return false;" +
+                "  sel.value = target;" +
+                "  sel.dispatchEvent(new Event('change', {bubbles: true}));" +
+                "  return true;" +
+                "})(" + JSONObject.quote(targetWeek) + ");";
 
-                if (!shiftDate.isEmpty() && !knownDates.contains(shiftDate)) {
-                    knownDates.add(shiftDate);
-                    hasNewShifts = true;
-                    // New daily timecard found while app was closed!
-                    postNativeNotification(
-                            "New Timecard Posted!",
-                            "Shift for " + shiftDate + " (" + hours + " hrs) is now available. Tap to inspect.",
-                            weekEndDate,
-                            shiftDate
+        headlessWebView.evaluateJavascript(selectJs, raw -> {
+            if (isFinished) return;
+            mainHandler.postDelayed(() -> pollRolloverWeekReady(params, targetWeek, weekOptions, 0), 900);
+        });
+    }
+
+    private void pollRolloverWeekReady(
+            final JobParameters params,
+            final String targetWeek,
+            final List<String> weekOptions,
+            final int attempt
+    ) {
+        if (isFinished || headlessWebView == null) return;
+        if (attempt > 15) {
+            ingestCapturedWeeksWithBridge(params);
+            return;
+        }
+
+        String checkJs = "(function(){" +
+                "  var loader = document.querySelector('#tcvLoader');" +
+                "  var loaderVis = !!(loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none');" +
+                "  var sel = document.querySelector('.timecard-date-dropdown select');" +
+                "  var cur = sel && sel.value ? sel.value.trim() : '';" +
+                "  return JSON.stringify({ready: !loaderVis && !!cur, cur: cur});" +
+                "})();";
+
+        headlessWebView.evaluateJavascript(checkJs, raw -> {
+            if (isFinished) return;
+            try {
+                JSONObject obj = new JSONObject(unquoteJsString(raw));
+                if (obj.optBoolean("ready", false) && targetWeek.equals(obj.optString("cur", ""))) {
+                    expandAccordionsAndCapture(params, targetWeek, weekOptions, true);
+                    return;
+                }
+            } catch (Exception ignored) {}
+            mainHandler.postDelayed(() -> pollRolloverWeekReady(params, targetWeek, weekOptions, attempt + 1), 600);
+        });
+    }
+
+    /** Executes android_bridge.js inside a local offline WebView to parse & persist captured HTML identically to foreground. */
+    @SuppressLint("SetJavaScriptEnabled")
+    private void ingestCapturedWeeksWithBridge(final JobParameters params) {
+        if (isFinished || capturedWeeks.isEmpty()) {
+            finishJobCleanly(params, false);
+            return;
+        }
+
+        try {
+            bridgeWebView = new WebView(this);
+            WebSettings settings = bridgeWebView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+            bridgeWebView.addJavascriptInterface(new BgNativeBridge(), "AndroidNative");
+
+            bridgeWebView.setWebViewClient(new WebViewClient() {
+                @Override
+                public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                    if (request == null || request.getUrl() == null) {
+                        return super.shouldInterceptRequest(view, request);
+                    }
+                    String host = request.getUrl().getHost();
+                    String path = request.getUrl().getPath();
+                    if (PortalHelper.APP_HOST.equalsIgnoreCase(host)) {
+                        if ("/__bg_bridge.html".equals(path)) {
+                            String html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" +
+                                    "<script src=\"/android_bridge.js\"></script></head><body></body></html>";
+                            return new WebResourceResponse(
+                                    "text/html",
+                                    "UTF-8",
+                                    new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8))
+                            );
+                        }
+                        return PortalHelper.loadAppAssetResponse(TimecardSyncJobService.this, path);
+                    }
+                    return PortalHelper.emptyAssetResponse();
+                }
+
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    super.onPageFinished(view, url);
+                    if (!bridgeIngestStarted && url != null && url.contains("__bg_bridge.html")) {
+                        bridgeIngestStarted = true;
+                        runBridgeIngestionJs(params);
+                    }
+                }
+            });
+
+            bridgeWebView.loadUrl("https://" + PortalHelper.APP_HOST + "/__bg_bridge.html");
+        } catch (Exception e) {
+            finishJobCleanly(params, false);
+        }
+    }
+
+    private void runBridgeIngestionJs(final JobParameters params) {
+        if (isFinished || bridgeWebView == null) return;
+
+        StringBuilder js = new StringBuilder();
+        js.append("(function(){");
+        js.append("  if (!window.TimecardBridge || !window.TimecardBridge.ingestWeekHtml) return JSON.stringify({ok:false});");
+        for (CapturedWeek w : capturedWeeks) {
+            js.append("  window.TimecardBridge.ingestWeekHtml(")
+                    .append(quoteForJs(w.rawHtml))
+                    .append(",")
+                    .append(quoteForJs(w.weekEndDate))
+                    .append(");");
+        }
+        js.append("  if (window.TimecardBridge.recordBackgroundSyncComplete) {");
+        js.append("    window.TimecardBridge.recordBackgroundSyncComplete(")
+                .append(quoteForJs("Background auto-check updated " + capturedWeeks.size() + " week(s)."))
+                .append(", 'Background Sync');");
+        js.append("  }");
+        js.append("  var newCards = window.TimecardBridge.getNewTimecardsJson ? window.TimecardBridge.getNewTimecardsJson() : '[]';");
+        js.append("  return JSON.stringify({ok:true, new_timecards: JSON.parse(newCards || '[]')});");
+        js.append("})();");
+
+        bridgeWebView.evaluateJavascript(js.toString(), raw -> {
+            if (isFinished) return;
+            try {
+                JSONObject res = new JSONObject(unquoteJsString(raw));
+                if (res.optBoolean("ok", false)) {
+                    String postStoreJson = PortalHelper.readFileString(
+                            TimecardSyncJobService.this,
+                            PortalHelper.STORE_FILENAME
                     );
+                    notifyForChanges(res.optJSONArray("new_timecards"), preStoreJson, postStoreJson);
+                    getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE)
+                            .edit()
+                            .putLong(PREF_LAST_BG_SYNC_MS, System.currentTimeMillis())
+                            .apply();
                 }
-            }
+            } catch (Exception ignored) {}
 
-            // Save newly discovered shift dates so they are not repeatedly notified every 15 minutes
-            if (hasNewShifts && storeObj != null) {
-                JSONArray weeks = storeObj.optJSONArray("weeks");
-                if (weeks != null && weeks.length() > 0) {
-                    JSONObject latestWeek = weeks.getJSONObject(0);
-                    JSONArray existingShifts = latestWeek.optJSONArray("shifts");
-                    if (existingShifts == null) {
-                        existingShifts = new JSONArray();
-                        latestWeek.put("shifts", existingShifts);
-                    }
-                    for (int j = 0; j < newShifts.length(); j++) {
-                        JSONObject s = newShifts.getJSONObject(j);
-                        String shiftDate = s.optString("date", "");
-                        boolean alreadyInList = false;
-                        for (int k = 0; k < existingShifts.length(); k++) {
-                            if (shiftDate.equals(existingShifts.getJSONObject(k).optString("date", ""))) {
-                                alreadyInList = true;
-                                break;
-                            }
-                        }
-                        if (!alreadyInList) {
-                            existingShifts.put(s);
-                        }
-                    }
-                    try (FileOutputStream fos = new FileOutputStream(storeFile, false)) {
-                        fos.write(storeObj.toString().getBytes(StandardCharsets.UTF_8));
-                    } catch (Exception ignored) {}
-                }
-            }
-
-        } catch (Exception ignored) {}
-    }
-
-    private void postNativeNotification(String title, String body, String weekEndDate, String shiftDate) {
-        try {
-            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm == null) return;
-
-            NotificationChannel channel = new NotificationChannel(
-                    NOTIFICATION_CHANNEL_ID,
-                    "Daily Timecard Alerts",
-                    NotificationManager.IMPORTANCE_HIGH
-            );
-            channel.setDescription("Alerts when a new daily timecard is posted by supervisor");
-            nm.createNotificationChannel(channel);
-
-            Intent intent = new Intent(this, MainActivity.class);
-            if (weekEndDate != null && !weekEndDate.isEmpty()) intent.putExtra("EXTRA_WEEK_END_DATE", weekEndDate);
-            if (shiftDate != null && !shiftDate.isEmpty()) intent.putExtra("EXTRA_SHIFT_DATE", shiftDate);
-            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
-            int notifId = (int) (System.currentTimeMillis() % 100000);
-            PendingIntent pi = PendingIntent.getActivity(this, notifId, intent, flags);
-
-            Notification.Builder builder = new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
-                    .setSmallIcon(R.drawable.ic_launcher)
-                    .setContentTitle(title)
-                    .setContentText(body)
-                    .setStyle(new Notification.BigTextStyle().bigText(body))
-                    .setAutoCancel(true)
-                    .setContentIntent(pi);
-
-            nm.notify(notifId, builder.build());
-        } catch (Exception ignored) {}
-    }
-
-    private void finishJobCleanly(JobParameters params, boolean reschedule) {
-        isFinished = true;
-        cleanupWebView();
-        try {
-            jobFinished(params, reschedule);
-        } catch (Exception ignored) {}
-    }
-
-    private void cleanupWebView() {
-        mainHandler.post(() -> {
-            if (headlessWebView != null) {
-                try {
-                    headlessWebView.stopLoading();
-                    headlessWebView.loadUrl("about:blank");
-                    headlessWebView.destroy();
-                } catch (Exception ignored) {}
-                headlessWebView = null;
-            }
+            CookieManager.getInstance().flush();
+            finishJobCleanly(params, false);
         });
     }
 
-    private String getPortalTimecardUrl() {
+    /** Fires deduplicated notifications for newly posted or newly completed shifts & punch edits. */
+    private void notifyForChanges(JSONArray bridgeNewTimecards, String beforeJson, String afterJson) {
         try {
-            File f = new File(getFilesDir(), PORTAL_CFG_FILENAME);
-            if (f.exists()) {
-                byte[] data = readFileFully(f);
-                if (data.length > 0) {
-                    JSONObject obj = new JSONObject(new String(data, StandardCharsets.UTF_8));
-                    String base = obj.optString("base_url", "");
-                    if (!base.isEmpty()) return base + DEFAULT_TIMECARD_PATH;
+            if (afterJson == null || afterJson.trim().isEmpty()) return;
+
+            JSONObject afterStore = new JSONObject(afterJson);
+            JSONObject beforeStore = (beforeJson != null && !beforeJson.trim().isEmpty())
+                    ? new JSONObject(beforeJson)
+                    : new JSONObject();
+
+            boolean isInitialBaseline = beforeStore.optJSONArray("weeks") == null
+                    || beforeStore.optJSONArray("weeks").length() == 0;
+
+            SharedPreferences prefs = getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE);
+            Set<String> notifiedSet = new HashSet<>(prefs.getStringSet(PREF_NOTIFIED_SIGNATURES, new HashSet<>()));
+            Map<String, JSONObject> preShiftsByDate = indexShiftsByDate(beforeStore);
+            Map<String, JSONObject> afterShiftsByDate = indexShiftsByDate(afterStore);
+
+            if (isInitialBaseline) {
+                for (Map.Entry<String, JSONObject> entry : afterShiftsByDate.entrySet()) {
+                    if (isShiftWorked(entry.getValue())) {
+                        notifiedSet.add(entry.getKey() + "|started");
+                        if (isShiftComplete(entry.getValue())) {
+                            notifiedSet.add(entry.getKey() + "|complete");
+                        }
+                    }
+                }
+                prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, notifiedSet).apply();
+                return;
+            }
+
+            LinkedHashMap<String, JSONObject> shiftsToNotify = new LinkedHashMap<>();
+
+            // 1. Shifts flagged directly by TimecardBridge.upsertParsedWeek
+            if (bridgeNewTimecards != null) {
+                for (int i = 0; i < bridgeNewTimecards.length(); i++) {
+                    JSONObject item = bridgeNewTimecards.optJSONObject(i);
+                    String date = item != null ? item.optString("date", "") : "";
+                    if (!date.isEmpty() && afterShiftsByDate.containsKey(date)) {
+                        shiftsToNotify.put(date, afterShiftsByDate.get(date));
+                    }
                 }
             }
+
+            // 2. Shifts that transitioned from open/0h to completed worked hours since last sync
+            for (Map.Entry<String, JSONObject> entry : afterShiftsByDate.entrySet()) {
+                String date = entry.getKey();
+                JSONObject postShift = entry.getValue();
+                if (!isShiftWorked(postShift)) continue;
+
+                JSONObject preShift = preShiftsByDate.get(date);
+                boolean becameWorked = (preShift == null || !isShiftWorked(preShift));
+                boolean becameCompleted = isShiftComplete(postShift) && (preShift == null || !isShiftComplete(preShift));
+
+                if (becameWorked || becameCompleted) {
+                    shiftsToNotify.put(date, postShift);
+                }
+            }
+
+            List<JSONObject> freshAlerts = new ArrayList<>();
+            for (Map.Entry<String, JSONObject> entry : shiftsToNotify.entrySet()) {
+                String date = entry.getKey();
+                JSONObject s = entry.getValue();
+                boolean complete = isShiftComplete(s);
+                String stageKey = date + (complete ? "|complete" : "|started");
+                if (notifiedSet.contains(stageKey)) continue;
+
+                notifiedSet.add(date + "|started");
+                if (complete) notifiedSet.add(date + "|complete");
+                freshAlerts.add(s);
+            }
+
+            if (!freshAlerts.isEmpty()) {
+                JSONObject latest = freshAlerts.get(freshAlerts.size() - 1);
+                String targetWeekEnd = latest.optString("week_end_date", "");
+                String targetDate = latest.optString("date", "");
+                String title = freshAlerts.size() == 1
+                        ? (isShiftComplete(latest) ? "New Timecard Added (" + targetDate + ")" : "Shift Clock-In Posted (" + targetDate + ")")
+                        : freshAlerts.size() + " New Daily Timecards Added";
+
+                StringBuilder body = new StringBuilder();
+                for (int i = 0; i < freshAlerts.size(); i++) {
+                    if (i > 0) body.append(" | ");
+                    JSONObject s = freshAlerts.get(i);
+                    String startClk = s.optString("start_time_clock", "");
+                    String endClk = s.optString("end_time_clock", "");
+                    String punches = (!startClk.isEmpty() && !endClk.isEmpty())
+                            ? startClk + " - " + endClk
+                            : (!startClk.isEmpty() ? "Started " + startClk : "Punches posted");
+                    body.append(s.optString("date", ""))
+                            .append(": ")
+                            .append(punches)
+                            .append(String.format(Locale.US, " (%.2f hrs • $%.2f)",
+                                    s.optDouble("total_hours", 0.0),
+                                    s.optDouble("gross_pay", 0.0)));
+                }
+
+                PortalHelper.postShiftNotification(this, title, body.toString(), targetWeekEnd, targetDate);
+            }
+
+            // 3. Punch Audit modifications detected in background
+            notifyForNewAudits(beforeStore.optJSONArray("audit_logs"), afterStore.optJSONArray("audit_logs"), notifiedSet);
+
+            prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, notifiedSet).apply();
         } catch (Exception ignored) {}
-        String base = new String(
-                android.util.Base64.decode("aHR0cHM6Ly93d3cudXBzZXJzLmNvbQ==", android.util.Base64.DEFAULT),
-                StandardCharsets.UTF_8
-        );
-        return base + DEFAULT_TIMECARD_PATH;
     }
 
-    private static byte[] readFileFully(File file) throws IOException {
-        try (FileInputStream fis = new FileInputStream(file);
-             ByteArrayOutputStream baos = new ByteArrayOutputStream((int) Math.min(file.length(), 65536))) {
-            byte[] buf = new byte[8192];
-            int len;
-            while ((len = fis.read(buf)) > 0) {
-                baos.write(buf, 0, len);
+    private void notifyForNewAudits(JSONArray preAudits, JSONArray postAudits, Set<String> notifiedSet) {
+        if (postAudits == null || postAudits.length() == 0) return;
+
+        Set<String> existingAuditKeys = new HashSet<>();
+        if (preAudits != null) {
+            for (int i = 0; i < preAudits.length(); i++) {
+                JSONObject a = preAudits.optJSONObject(i);
+                if (a != null) existingAuditKeys.add(auditKey(a));
             }
-            return baos.toByteArray();
+        }
+
+        for (int i = 0; i < postAudits.length(); i++) {
+            JSONObject a = postAudits.optJSONObject(i);
+            if (a == null) continue;
+            String k = auditKey(a);
+            if (existingAuditKeys.contains(k) || notifiedSet.contains("audit|" + k)) continue;
+
+            notifiedSet.add("audit|" + k);
+            String title = "Punch Modification Detected (" + a.optString("date", "") + ")";
+            String body = a.optString("field_name", "Punch")
+                    + " changed: "
+                    + a.optString("old_value", "")
+                    + " → "
+                    + a.optString("new_value", "");
+            PortalHelper.postShiftNotification(this, title, body, a.optString("week_end_date", ""), a.optString("date", ""));
+            break; // Post concise alert per sync cycle
+        }
+    }
+
+    private static String auditKey(JSONObject a) {
+        return a.optString("week_end_date", "") + "|"
+                + a.optString("date", "") + "|"
+                + a.optString("field_name", "") + "|"
+                + a.optString("old_value", "") + "|"
+                + a.optString("new_value", "");
+    }
+
+    private static Map<String, JSONObject> indexShiftsByDate(JSONObject store) {
+        Map<String, JSONObject> map = new LinkedHashMap<>();
+        JSONObject details = store.optJSONObject("week_details");
+        if (details == null) return map;
+        JSONArray names = details.names();
+        if (names == null) return map;
+        for (int i = 0; i < names.length(); i++) {
+            String wed = names.optString(i, "");
+            JSONObject week = details.optJSONObject(wed);
+            JSONArray shifts = week != null ? week.optJSONArray("shifts") : null;
+            if (shifts == null) continue;
+            for (int j = 0; j < shifts.length(); j++) {
+                JSONObject s = shifts.optJSONObject(j);
+                String d = s != null ? s.optString("date", "") : "";
+                if (!d.isEmpty()) map.put(d, s);
+            }
+        }
+        return map;
+    }
+
+    private static boolean isShiftWorked(JSONObject shift) {
+        if (shift == null) return false;
+        boolean hasStart = !shift.isNull("start_time_dec") && !shift.optString("start_time_clock", "").isEmpty();
+        return hasStart || shift.optDouble("total_hours", 0.0) > 0.005;
+    }
+
+    private static boolean isShiftComplete(JSONObject shift) {
+        if (shift == null) return false;
+        return shift.optDouble("total_hours", 0.0) > 0.005
+                && !shift.optString("end_time_clock", "").isEmpty();
+    }
+
+    private static List<String> jsonArrayToList(JSONArray arr) {
+        List<String> out = new ArrayList<>();
+        if (arr == null) return out;
+        for (int i = 0; i < arr.length(); i++) {
+            String s = arr.optString(i, "").trim();
+            if (!s.isEmpty()) out.add(s);
+        }
+        return out;
+    }
+
+    private static String quoteForJs(String s) {
+        String quoted = JSONObject.quote(s != null ? s : "");
+        return quoted.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+    }
+
+    private String unquoteJsString(String raw) {
+        if (raw == null || "null".equals(raw)) return "";
+        try {
+            Object v = new JSONTokener(raw).nextValue();
+            return v instanceof String ? (String) v : String.valueOf(v);
+        } catch (Exception e) {
+            return raw;
+        }
+    }
+
+    private void cancelWatchdog() {
+        if (watchdogRunnable != null) {
+            mainHandler.removeCallbacks(watchdogRunnable);
+            watchdogRunnable = null;
+        }
+    }
+
+    private void finishJobCleanly(final JobParameters params, final boolean reschedule) {
+        if (isFinished) return;
+        isFinished = true;
+        cancelWatchdog();
+        mainHandler.post(() -> {
+            cleanupWebViews();
+            try {
+                jobFinished(params, reschedule);
+            } catch (Exception ignored) {}
+        });
+    }
+
+    private void cleanupWebViews() {
+        headlessWebView = destroyWebView(headlessWebView);
+        bridgeWebView = destroyWebView(bridgeWebView);
+    }
+
+    private static WebView destroyWebView(WebView wv) {
+        if (wv == null) return null;
+        try {
+            wv.stopLoading();
+            wv.loadUrl("about:blank");
+            wv.clearHistory();
+            wv.removeAllViews();
+            wv.destroy();
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    /** Minimal synchronous AndroidNative bridge exposed strictly to offline __bg_bridge.html. */
+    private final class BgNativeBridge {
+        @JavascriptInterface
+        public String loadStateJson() {
+            return PortalHelper.readFileString(TimecardSyncJobService.this, PortalHelper.STORE_FILENAME);
+        }
+
+        @JavascriptInterface
+        public void saveStateJson(String json) {
+            PortalHelper.writeTextFileAtomic(TimecardSyncJobService.this, PortalHelper.STORE_FILENAME, json);
+        }
+
+        @JavascriptInterface
+        public String loadArchiveJson() {
+            return PortalHelper.readFileString(TimecardSyncJobService.this, PortalHelper.ARCHIVE_FILENAME);
+        }
+
+        @JavascriptInterface
+        public void saveArchiveJson(String json) {
+            PortalHelper.mergeAndSaveArchiveJsonSync(TimecardSyncJobService.this, json);
+        }
+
+        @JavascriptInterface
+        public long getStoreLastModified() {
+            return PortalHelper.getStoreLastModified(TimecardSyncJobService.this);
+        }
+
+        @JavascriptInterface
+        public boolean isLoggedIn() {
+            return true;
         }
     }
 }
-

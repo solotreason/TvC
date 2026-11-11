@@ -2,6 +2,28 @@
 
 ## Status & Phases
 
+### Current Sprint: True Closed-App Background Sync & Instant Disk Refresh (v2.4.3)
+
+- [x] 1. **Shared Portal & Storage Helper (`PortalHelper.java`)**:
+  - Extracted shared constants (`STORE_FILENAME`, `ARCHIVE_FILENAME`, `OTA_DIR_NAME`, `AUTH_MARKER_FILENAME`, `NOTIFICATION_CHANNEL_ID`, portal URL resolution) and synchronized atomic JSON file read/write utilities (`readFileFully`, `writeTextFileAtomic`).
+  - Centralized Microsoft KMSI/security interstitial auto-bypass, background asset blocking, cookie auth verification, OTA/asset resource loading, native shift notification formatting, archive vault merging, and battery optimization helpers for both `MainActivity` and `TimecardSyncJobService`.
+
+- [x] 2. **Upgrade Closed-App `TimecardSyncJobService.java`**:
+  - Preserved existing periodic `JobScheduler` schedule (`getPendingJob`) instead of resetting its timer on every app launch.
+  - Performed headless WebView portal loading with persistent cookies, KMSI/security bypass, interactive login early-exit guard, and 55s battery watchdog.
+  - Expanded `.list-view` and all `tr.timecard-card` accordions, captured full week HTML (plus previous week on rollover if still non-finalized), and executed `android_bridge.js` (`TimecardBridge.ingestWeekHtml`) inside an offline local bridge WebView so `timecard_store_v4.json` and `timecard_archive_v1.json` are completely updated while the app is closed.
+  - Triggered deduplicated native Android notifications for newly posted/completed shifts and punch audit changes.
+
+- [x] 3. **Instant Foreground Resume from Disk & Battery Saver Guidance**:
+  - Exposed `getStoreLastModified()`, `isIgnoringBatteryOptimizations()`, and `requestIgnoreBatteryOptimizations()` in `AndroidNativeBridge`.
+  - Added `TimecardBridge.reloadFromDiskIfUpdated()` in `static/android_bridge.js` and wired it into `onAppResumedSmartCheck()` / `visibilitychange` in `static/app.js` so background updates render in 0ms on resume.
+  - Added `#batteryOptNotice` Android battery optimization advisory banner in `static/index.html` + `static/app.js` when background execution is throttled, and declared `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` in `AndroidManifest.xml`.
+
+- [x] 4. **Verify, Package OTA & Build APK (v2.4.3)**:
+  - Bumped version to `2.4.3` (Build `2026111002`) cleanly across config, Android Gradle/Java, FastAPI, and OTA bundle.
+  - Ran `python -m unittest discover tests -v` (20/20 passed), `python run.py --pack-ota` (165.1 KB), and compiled `Timecard-Tracker.apk` (0.24 MB).
+  - Documented results and prepared push to `origin main`.
+
 ### Completed Sprint: Comprehensive Senior Code Audit & Polish
 
 - [x] 1. **Codebase Scan & Research**:

@@ -203,6 +203,42 @@ class TestNewFeatures(unittest.TestCase):
         except Exception:
             pass
 
+    def test_closed_app_sync_and_disk_reload_contracts(self):
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+        helper_path = os.path.join(root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "PortalHelper.java")
+        job_path = os.path.join(root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "TimecardSyncJobService.java")
+        bridge_path = os.path.join(root_dir, "static", "android_bridge.js")
+        app_js_path = os.path.join(root_dir, "static", "app.js")
+        index_html_path = os.path.join(root_dir, "static", "index.html")
+        manifest_path = os.path.join(root_dir, "android", "app", "src", "main", "AndroidManifest.xml")
+
+        with open(helper_path, "r", encoding="utf-8") as f:
+            helper_src = f.read()
+        with open(job_path, "r", encoding="utf-8") as f:
+            job_src = f.read()
+        with open(bridge_path, "r", encoding="utf-8") as f:
+            bridge_src = f.read()
+        with open(app_js_path, "r", encoding="utf-8") as f:
+            app_js_src = f.read()
+        with open(index_html_path, "r", encoding="utf-8") as f:
+            html_src = f.read()
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest_src = f.read()
+
+        # Verify shared helper + atomic file storage + closed-app full ingestion
+        self.assertIn("writeTextFileAtomic", helper_src)
+        self.assertIn("getPendingJob(JOB_ID)", job_src)
+        self.assertIn("window.TimecardBridge.ingestWeekHtml", job_src)
+        self.assertIn("recordBackgroundSyncComplete", job_src)
+
+        # Verify disk reload & foreground refresh bridges
+        self.assertIn("reloadFromDiskIfUpdated", bridge_src)
+        self.assertIn("getNewTimecardsJson", bridge_src)
+        self.assertIn("syncFromNativeDiskIfUpdated", app_js_src)
+        self.assertIn("refreshDashboardFromStore", app_js_src)
+        self.assertIn('id="batteryOptNotice"', html_src)
+        self.assertIn("REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", manifest_src)
+
     @classmethod
     def tearDownClass(cls):
         conn = get_connection()

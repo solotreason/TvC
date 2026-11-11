@@ -551,16 +551,71 @@
     saveDatabase(db);
   }
 
-  // Expose callbacks for Android MainActivity WebView scraper
+  let lastLoadedStoreMtime = (
+    typeof window.AndroidNative !== 'undefined' &&
+    typeof window.AndroidNative.getStoreLastModified === 'function'
+  ) ? Number(window.AndroidNative.getStoreLastModified()) || 0 : 0;
+
+  function syncStoreMtimeFromNative() {
+    try {
+      if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.getStoreLastModified === 'function') {
+        const m = Number(window.AndroidNative.getStoreLastModified()) || 0;
+        if (m > 0) lastLoadedStoreMtime = m;
+      }
+    } catch (e) {}
+  }
+
+  // Expose callbacks for Android MainActivity WebView scraper & closed-app TimecardSyncJobService
   window.TimecardBridge = {
     ingestWeekHtml: function (rawHtml, selectedWeekEnd) {
       const parsed = parseTimecardHtml(rawHtml, selectedWeekEnd || null);
       const avail = upsertParsedWeek(parsed);
+      syncStoreMtimeFromNative();
       return JSON.stringify(avail.map(w => w.week_end_date));
     },
     ingestTimeoffHtml: function (rawHtml) {
       const parsed = parseTimeoffHtml(rawHtml);
       upsertParsedTimeoff(parsed);
+      syncStoreMtimeFromNative();
+      return 'OK';
+    },
+    reloadFromDiskIfUpdated: function () {
+      if (typeof window.AndroidNative === 'undefined' || typeof window.AndroidNative.loadStateJson !== 'function') {
+        return false;
+      }
+      const diskMtime = typeof window.AndroidNative.getStoreLastModified === 'function'
+        ? Number(window.AndroidNative.getStoreLastModified()) || 0
+        : 0;
+      if (diskMtime > 0 && diskMtime <= lastLoadedStoreMtime && cachedDb !== null) {
+        return false;
+      }
+      const raw = window.AndroidNative.loadStateJson();
+      if (!raw || !raw.trim()) return false;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          cachedDb = parsed;
+          try { localStorage.setItem(STORAGE_KEY, raw); } catch (e) {}
+          if (diskMtime > 0) lastLoadedStoreMtime = diskMtime;
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    },
+    getNewTimecardsJson: function () {
+      return JSON.stringify(syncState.new_timecards || []);
+    },
+    recordBackgroundSyncComplete: function (message, statusLabel) {
+      const db = loadDatabase();
+      const nowStamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      db.latest_log = {
+        status: statusLabel || 'Background Sync',
+        message: message || 'Checked for new timecards in background.',
+        timestamp: nowStamp
+      };
+      saveDatabase(db);
+      syncState.latest_log = db.latest_log;
+      syncStoreMtimeFromNative();
       return 'OK';
     },
     updateProgress: function (percent, stage, message, requiresLogin) {

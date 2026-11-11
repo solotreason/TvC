@@ -2,10 +2,6 @@ package com.timecard.tracker;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -75,8 +71,8 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026110909L;
-    private static final String APP_BASE_VERSION = "2.4.2";
+    private static final long APP_BASE_BUILD = 2026111002L;
+    private static final String APP_BASE_VERSION = "2.4.3";
 
     private WebView dashboardWebView;
     private WebView scraperWebView;
@@ -155,34 +151,7 @@ public class MainActivity extends Activity {
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 if (uri != null && APP_HOST.equalsIgnoreCase(uri.getHost())) {
-                    String path = uri.getPath();
-                    if (path == null || path.equals("/") || path.isEmpty()) {
-                        path = "/index.html";
-                    }
-                    if (path.startsWith("/static/")) {
-                        path = path.substring("/static".length());
-                    }
-                    String relPath = path.startsWith("/") ? path.substring(1) : path;
-
-                    // 1. Check for OTA override on local device storage
-                    try {
-                        File otaDir = new File(getFilesDir(), OTA_DIR_NAME);
-                        File otaFile = new File(otaDir, relPath);
-                        if (otaFile.exists() && otaFile.isFile() && otaFile.length() > 0) {
-                            String mime = getMimeType(relPath);
-                            return new WebResourceResponse(mime, "UTF-8", new FileInputStream(otaFile));
-                        }
-                    } catch (Exception ignored) {}
-
-                    // 2. Fallback to APK bundled assets
-                    String assetPath = "www/" + relPath;
-                    try {
-                        InputStream is = getAssets().open(assetPath);
-                        String mime = getMimeType(assetPath);
-                        return new WebResourceResponse(mime, "UTF-8", is);
-                    } catch (Exception e) {
-                        return null;
-                    }
+                    return PortalHelper.loadAppAssetResponse(MainActivity.this, uri.getPath());
                 }
                 return super.shouldInterceptRequest(view, request);
             }
@@ -248,19 +217,9 @@ public class MainActivity extends Activity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 // Resource blocking during background sync (aborts images, fonts, and telemetry)
-                if (loginOverlayContainer.getVisibility() != View.VISIBLE && request != null && request.getUrl() != null) {
-                    String url = request.getUrl().toString().toLowerCase();
-                    if (url.endsWith(".png") || url.endsWith(".jpg") || url.endsWith(".jpeg")
-                            || url.endsWith(".gif") || url.endsWith(".woff2") || url.endsWith(".woff")
-                            || url.endsWith(".ttf") || url.contains("tealium") || url.contains("adroll")
-                            || url.contains("doubleclick") || url.contains("google-analytics")
-                            || url.contains("demdex") || url.contains("hotjar") || url.contains("optimizely")) {
-                        return new WebResourceResponse(
-                                "text/plain",
-                                "UTF-8",
-                                new ByteArrayInputStream(new byte[0])
-                        );
-                    }
+                if (loginOverlayContainer.getVisibility() != View.VISIBLE && request != null && request.getUrl() != null
+                        && PortalHelper.isBlockedBackgroundAsset(request.getUrl().toString())) {
+                    return PortalHelper.emptyAssetResponse();
                 }
                 return super.shouldInterceptRequest(view, request);
             }
@@ -269,7 +228,7 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 CookieManager.getInstance().flush();
-                injectMicrosoftSecurityBypass(view);
+                PortalHelper.injectMicrosoftSecurityBypass(MainActivity.this, view);
             }
         });
 
@@ -318,19 +277,8 @@ public class MainActivity extends Activity {
     }
 
     private void setupNotificationChannel() {
+        PortalHelper.setupNotificationChannel(this);
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-                if (nm != null) {
-                    NotificationChannel channel = new NotificationChannel(
-                            NOTIFICATION_CHANNEL_ID,
-                            "Daily Timecard Alerts",
-                            NotificationManager.IMPORTANCE_HIGH
-                    );
-                    channel.setDescription("Notifications whenever a new daily timecard is posted");
-                    nm.createNotificationChannel(channel);
-                }
-            }
             if (Build.VERSION.SDK_INT >= 33) {
                 if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
                     requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1001);
@@ -340,59 +288,11 @@ public class MainActivity extends Activity {
     }
 
     private void postNativeNotification(String title, String body, String weekEndDate, String shiftDate) {
-        try {
-            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm == null) return;
-
-            int notifId = (int) (System.currentTimeMillis() & 0x7fffffff);
-
-            Intent intent = new Intent(this, MainActivity.class);
-            intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            if (weekEndDate != null && !weekEndDate.isEmpty()) {
-                intent.putExtra(EXTRA_WEEK_END_DATE, weekEndDate);
-            }
-            if (shiftDate != null && !shiftDate.isEmpty()) {
-                intent.putExtra(EXTRA_SHIFT_DATE, shiftDate);
-            }
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
-            PendingIntent pendingIntent = PendingIntent.getActivity(this, notifId, intent, flags);
-
-            Notification.Builder builder = new Notification.Builder(this, NOTIFICATION_CHANNEL_ID);
-
-            builder.setSmallIcon(R.drawable.ic_launcher)
-                    .setContentTitle(title != null ? title : "New Timecard Added")
-                    .setContentText(body != null ? body : "A new daily timecard has been posted.")
-                    .setStyle(new Notification.BigTextStyle().bigText(body))
-                    .setAutoCancel(true)
-                    .setContentIntent(pendingIntent);
-
-            nm.notify(notifId, builder.build());
-        } catch (Exception ignored) {}
+        PortalHelper.postShiftNotification(this, title, body, weekEndDate, shiftDate);
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     private void setupWebViewDefaults(WebView webView) {
-        WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setLoadWithOverviewMode(true);
-        settings.setUseWideViewPort(true);
-        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setUserAgentString(
-                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-        );
-    }
-
-    private String getMimeType(String path) {
-        if (path.endsWith(".html")) return "text/html";
-        if (path.endsWith(".css")) return "text/css";
-        if (path.endsWith(".js")) return "application/javascript";
-        if (path.endsWith(".json")) return "application/json";
-        if (path.endsWith(".svg")) return "image/svg+xml";
-        if (path.endsWith(".png")) return "image/png";
-        if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
-        if (path.endsWith(".ico")) return "image/x-icon";
-        return "text/plain";
+        PortalHelper.setupWebViewDefaults(webView);
     }
 
     private String getActiveGitHubRepo() {
@@ -723,20 +623,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean checkCookiesLoggedIn() {
-        try {
-            File authFlag = new File(getFilesDir(), AUTH_MARKER_FILENAME);
-            if (authFlag.exists()) {
-                return true;
-            }
-            CookieManager cm = CookieManager.getInstance();
-            String portalCookies = cm.getCookie(getPortalBaseUrl());
-            String ssoCookies = cm.getCookie("https://login.microsoftonline.com");
-            boolean hasPortal = portalCookies != null && (portalCookies.contains("user_firstName") || portalCookies.contains("ak_prt") || portalCookies.contains("AMCV_"));
-            boolean hasSso = ssoCookies != null && (ssoCookies.contains("ESTSAUTHPERSISTENT") || ssoCookies.contains("brcap"));
-            return hasPortal || hasSso;
-        } catch (Exception e) {
-            return false;
-        }
+        return PortalHelper.checkCookiesLoggedIn(this);
     }
 
     private void sendProgressToDashboard(int pct, String stage, String msg, boolean reqLogin) {
@@ -766,47 +653,6 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {}
         });
-    }
-
-    private void injectMicrosoftSecurityBypass(WebView view) {
-        if (view == null) return;
-        String bypassJs = "(function(){" +
-                "  try {" +
-                "    var skipSelectors = [" +
-                "      '#btnAskLater', '#skipLink', 'a#skip', 'button#skip'," +
-                "      'a[id*=\"AskLater\"]', 'button[id*=\"AskLater\"]', 'a[id*=\"skip\"]', 'button[id*=\"skip\"]'" +
-                "    ];" +
-                "    for (var i = 0; i < skipSelectors.length; i++) {" +
-                "      var el = document.querySelector(skipSelectors[i]);" +
-                "      if (el && el.offsetParent !== null) { el.click(); return 'CLICKED_SKIP_ID'; }" +
-                "    }" +
-                "    var links = Array.from(document.querySelectorAll('a, button, input[type=\"button\"], input[type=\"submit\"]'));" +
-                "    for (var j = 0; j < links.length; j++) {" +
-                "      var txt = (links[j].innerText || links[j].value || '').trim().toLowerCase();" +
-                "      if (txt.indexOf('skip for now') !== -1 || txt.indexOf('ask later') !== -1 || txt.indexOf('skip setup') !== -1 || txt.indexOf('no thanks') !== -1) {" +
-                "        links[j].click(); return 'CLICKED_SKIP_TEXT';" +
-                "      }" +
-                "    }" +
-                "    var kmsiBtn = document.querySelector('#idSIButton9');" +
-                "    var isKmsi = document.querySelector('#KmsiDescription') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
-                "    if (kmsiBtn && isKmsi && kmsiBtn.offsetParent !== null) {" +
-                "      kmsiBtn.click(); return 'CLICKED_KMSI';" +
-                "    }" +
-                "    var href = (window.location.href || '').toLowerCase();" +
-                "    var bodyTxt = document.body ? (document.body.innerText || '').toLowerCase() : '';" +
-                "    var isSecurityScreen = href.indexOf('mysignins.microsoft.com') !== -1 ||" +
-                "                           bodyTxt.indexOf('more information required') !== -1 ||" +
-                "                           bodyTxt.indexOf('keep your account secure') !== -1 ||" +
-                "                           bodyTxt.indexOf('help us protect your account') !== -1 ||" +
-                "                           bodyTxt.indexOf('secure your account') !== -1;" +
-                "    if (isSecurityScreen) {" +
-                "      setTimeout(function() { window.location.href = '" + getTimecardPortalUrl() + "'; }, 1500);" +
-                "      return 'SECURITY_REDIRECT_SCHEDULED';" +
-                "    }" +
-                "  } catch(e) {}" +
-                "  return 'NOOP';" +
-                "})();";
-        view.evaluateJavascript(bypassJs, null);
     }
 
     // Monitor scraperWebView until .timecard-wrapper appears
@@ -1045,6 +891,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        TimecardSyncJobService.schedule(this);
         if (dashboardWebView != null) {
             handleNotificationIntent(getIntent());
             dashboardWebView.evaluateJavascript(
@@ -1067,151 +914,38 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public String loadStateJson() {
-            try {
-                File f = new File(getFilesDir(), STORE_FILENAME);
-                if (!f.exists()) return "";
-                byte[] data = readFileFully(f);
-                return new String(data, StandardCharsets.UTF_8);
-            } catch (Exception ignored) {}
-            return "";
+            return PortalHelper.readFileString(MainActivity.this, STORE_FILENAME);
         }
 
         @JavascriptInterface
         public void saveStateJson(String json) {
-            if (json == null) return;
-            try {
-                File f = new File(getFilesDir(), STORE_FILENAME);
-                try (FileOutputStream fos = new FileOutputStream(f, false)) {
-                    fos.write(json.getBytes(StandardCharsets.UTF_8));
-                }
-            } catch (Exception ignored) {}
+            PortalHelper.writeTextFileAtomic(MainActivity.this, STORE_FILENAME, json);
+        }
+
+        @JavascriptInterface
+        public long getStoreLastModified() {
+            return PortalHelper.getStoreLastModified(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public boolean isIgnoringBatteryOptimizations() {
+            return PortalHelper.isIgnoringBatteryOptimizations(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void requestIgnoreBatteryOptimizations() {
+            mainHandler.post(() -> PortalHelper.requestIgnoreBatteryOptimizations(MainActivity.this));
         }
 
         @JavascriptInterface
         public void saveArchiveJson(final String jsonInput) {
             if (jsonInput == null || jsonInput.trim().isEmpty()) return;
-            new Thread(() -> {
-                try {
-                    String json = jsonInput;
-                    File f = new File(getFilesDir(), ARCHIVE_FILENAME);
-                JSONObject incoming = new JSONObject(json);
-                JSONArray incomingWeeks = incoming.optJSONArray("archived_weeks");
-                JSONObject incomingDetails = incoming.optJSONObject("week_details");
-                if (incomingDetails == null) incomingDetails = new JSONObject();
-
-                // Cumulatively merge with existing archive file so older months are never deleted
-                if (f.exists() && f.length() > 0) {
-                    try {
-                        byte[] existingBytes = readFileFully(f);
-                        if (existingBytes.length > 0) {
-                            JSONObject existing = new JSONObject(new String(existingBytes, StandardCharsets.UTF_8));
-                            JSONArray existingWeeks = existing.optJSONArray("archived_weeks");
-                            JSONObject existingDetails = existing.optJSONObject("week_details");
-
-                            java.util.LinkedHashMap<String, JSONObject> mergedWeeks = new java.util.LinkedHashMap<>();
-                            if (incomingWeeks != null) {
-                                for (int i = 0; i < incomingWeeks.length(); i++) {
-                                    JSONObject w = incomingWeeks.getJSONObject(i);
-                                    String wed = w.optString("week_end_date");
-                                    if (!wed.isEmpty()) mergedWeeks.put(wed, w);
-                                }
-                            }
-                            if (existingWeeks != null) {
-                                for (int i = 0; i < existingWeeks.length(); i++) {
-                                    JSONObject w = existingWeeks.getJSONObject(i);
-                                    String wed = w.optString("week_end_date");
-                                    if (!wed.isEmpty() && !mergedWeeks.containsKey(wed)) {
-                                        mergedWeeks.put(wed, w);
-                                    }
-                                }
-                            }
-
-                            // Sort weeks descending by week_end_date
-                            java.util.List<String> sortedKeys = new java.util.ArrayList<>(mergedWeeks.keySet());
-                            java.util.Collections.sort(sortedKeys, java.util.Collections.reverseOrder());
-
-                            JSONArray finalWeeks = new JSONArray();
-                            for (String k : sortedKeys) {
-                                finalWeeks.put(mergedWeeks.get(k));
-                            }
-
-                            // Merge week_details
-                            JSONObject finalDetails = existingDetails != null ? new JSONObject(existingDetails.toString()) : new JSONObject();
-                            java.util.Iterator<String> inKeys = incomingDetails.keys();
-                            while (inKeys.hasNext()) {
-                                String k = inKeys.next();
-                                finalDetails.put(k, incomingDetails.get(k));
-                            }
-
-                            JSONObject combined = new JSONObject();
-                            combined.put("archived_weeks", finalWeeks);
-                            combined.put("week_details", finalDetails);
-
-                            // Merge audit_logs
-                            JSONArray incomingAudits = incoming.optJSONArray("audit_logs");
-                            JSONArray existingAudits = existing.optJSONArray("audit_logs");
-                            java.util.LinkedHashMap<String, JSONObject> mergedAudits = new java.util.LinkedHashMap<>();
-                            if (incomingAudits != null) {
-                                for (int i = 0; i < incomingAudits.length(); i++) {
-                                    JSONObject a = incomingAudits.getJSONObject(i);
-                                    String k = a.optString("week_end_date") + "|" + a.optString("date") + "|" + a.optString("field_name") + "|" + a.optString("old_value") + "|" + a.optString("new_value");
-                                    mergedAudits.put(k, a);
-                                }
-                            }
-                            if (existingAudits != null) {
-                                for (int i = 0; i < existingAudits.length(); i++) {
-                                    JSONObject a = existingAudits.getJSONObject(i);
-                                    String k = a.optString("week_end_date") + "|" + a.optString("date") + "|" + a.optString("field_name") + "|" + a.optString("old_value") + "|" + a.optString("new_value");
-                                    if (!mergedAudits.containsKey(k)) mergedAudits.put(k, a);
-                                }
-                            }
-                            JSONArray finalAudits = new JSONArray();
-                            for (JSONObject a : mergedAudits.values()) finalAudits.put(a);
-                            combined.put("audit_logs", finalAudits);
-
-                            // Merge corrections
-                            JSONArray incomingCorrs = incoming.optJSONArray("corrections");
-                            JSONArray existingCorrs = existing.optJSONArray("corrections");
-                            java.util.LinkedHashMap<String, JSONObject> mergedCorrs = new java.util.LinkedHashMap<>();
-                            if (incomingCorrs != null) {
-                                for (int i = 0; i < incomingCorrs.length(); i++) {
-                                    JSONObject c = incomingCorrs.getJSONObject(i);
-                                    String k = c.optString("timestamp") + "|" + c.optString("item") + "|" + c.optString("old_val") + "|" + c.optString("new_val");
-                                    mergedCorrs.put(k, c);
-                                }
-                            }
-                            if (existingCorrs != null) {
-                                for (int i = 0; i < existingCorrs.length(); i++) {
-                                    JSONObject c = existingCorrs.getJSONObject(i);
-                                    String k = c.optString("timestamp") + "|" + c.optString("item") + "|" + c.optString("old_val") + "|" + c.optString("new_val");
-                                    if (!mergedCorrs.containsKey(k)) mergedCorrs.put(k, c);
-                                }
-                            }
-                            JSONArray finalCorrs = new JSONArray();
-                            for (JSONObject c : mergedCorrs.values()) finalCorrs.put(c);
-                            combined.put("corrections", finalCorrs);
-
-                            json = combined.toString();
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                try (FileOutputStream fos = new FileOutputStream(f, false)) {
-                    fos.write(json.getBytes(StandardCharsets.UTF_8));
-                }
-            } catch (Exception ignored) {}
-        }).start();
-    }
+            new Thread(() -> PortalHelper.mergeAndSaveArchiveJsonSync(MainActivity.this, jsonInput)).start();
+        }
 
         @JavascriptInterface
         public String loadArchiveJson() {
-            try {
-                File f = new File(getFilesDir(), ARCHIVE_FILENAME);
-                if (!f.exists()) return "";
-                byte[] data = readFileFully(f);
-                return new String(data, StandardCharsets.UTF_8);
-            } catch (Exception ignored) {}
-            return "";
+            return PortalHelper.readFileString(MainActivity.this, ARCHIVE_FILENAME);
         }
 
         @JavascriptInterface
@@ -1257,6 +991,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void openLoginSheet() {
             mainHandler.post(() -> {
+                TimecardSyncJobService.schedule(MainActivity.this);
                 // On first login, automatically sync all 8+ weeks as soon as login completes
                 isSyncRunning = true;
                 requestedMaxWeeks = 0;

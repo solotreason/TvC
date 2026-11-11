@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.2", lifespan=lifespan)
+app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.3", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -384,8 +384,8 @@ def get_ota_status():
         except Exception:
             pass
     return {
-        "version": "2.4.2",
-        "build": 2026110909,
+        "version": "2.4.3",
+        "build": 2026111002,
         "github_repo": "solotreason/TvC",
         "release_notes": "OTA Live Update Active"
     }
@@ -397,7 +397,7 @@ def check_ota_updates():
         import urllib.request
         req = urllib.request.Request(
             "https://cdn.jsdelivr.net/gh/solotreason/TvC@main/version.json",
-            headers={"User-Agent": "TvC-Web/2.4.2"}
+            headers={"User-Agent": "TvC-Web/2.4.3"}
         )
         with urllib.request.urlopen(req, timeout=3.5) as resp:
             remote = json.loads(resp.read().decode("utf-8"))
@@ -415,7 +415,7 @@ def check_ota_updates():
             return {
                 "status": "OK",
                 "up_to_date": True,
-                "version": local_meta.get("version", "2.4.2"),
+                "version": local_meta.get("version", "2.4.3"),
                 "build": local_build
             }
     except Exception:
@@ -423,7 +423,7 @@ def check_ota_updates():
         return {
             "status": "OK",
             "up_to_date": True,
-            "version": local_meta.get("version", "2.4.2"),
+            "version": local_meta.get("version", "2.4.3"),
             "build": int(local_meta.get("build", 0))
         }
 

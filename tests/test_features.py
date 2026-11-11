@@ -225,9 +225,13 @@ class TestNewFeatures(unittest.TestCase):
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest_src = f.read()
 
-        # Verify shared helper + atomic file storage + closed-app full ingestion
+        # Verify shared helper + atomic file storage + closed-app full ingestion + battery efficiency
         self.assertIn("writeTextFileAtomic", helper_src)
+        self.assertIn("clearBackgroundSyncPrefs", helper_src)
         self.assertIn("getPendingJob(JOB_ID)", job_src)
+        self.assertIn("shouldSkipForBatteryEfficiency", job_src)
+        self.assertIn("isTodayShiftCompletedInStore", job_src)
+        self.assertIn("PREF_LAST_PAGE_FINGERPRINT", job_src)
         self.assertIn("window.TimecardBridge.ingestWeekHtml", job_src)
         self.assertIn("recordBackgroundSyncComplete", job_src)
 
@@ -237,6 +241,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("syncFromNativeDiskIfUpdated", app_js_src)
         self.assertIn("refreshDashboardFromStore", app_js_src)
         self.assertIn('id="batteryOptNotice"', html_src)
+        self.assertIn('id="dismissBatteryOptBtn"', html_src)
         self.assertIn("REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", manifest_src)
 
     @classmethod

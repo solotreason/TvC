@@ -7,9 +7,13 @@ import android.app.job.JobScheduler;
 import android.app.job.JobService;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.os.BatteryManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
@@ -24,7 +28,10 @@ import org.json.JSONTokener;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,17 +41,20 @@ import java.util.Set;
 
 /**
  * Closed-app periodic JobService that scrapes updated timecard HTML in the background,
- * invokes the shared android_bridge.js parser/storage engine to persist full shift,
- * breakdown, weekly pay, audit, and archive data to disk, and posts native notifications.
+ * uses adaptive battery/shift throttling and an unchanged-DOM fingerprint short-circuit,
+ * invokes the shared android_bridge.js engine only when data changes, and posts alerts.
  */
 public class TimecardSyncJobService extends JobService {
 
     public static final int JOB_ID = 2026;
 
-    private static final String PREF_LAST_BG_SYNC_MS = "last_bg_sync_ms";
     private static final String PREF_NOTIFIED_SIGNATURES = "notified_shift_signatures_v2";
-    private static final long PERIODIC_INTERVAL_MS = 15 * 60 * 1000L;
-    private static final long PERIODIC_FLEX_MS = 5 * 60 * 1000L;
+    private static final long PERIODIC_INTERVAL_MS = 30 * 60 * 1000L;
+    private static final long PERIODIC_FLEX_MS = 10 * 60 * 1000L;
+    private static final long ACTIVE_MIN_GAP_MS = 15 * 60 * 1000L;
+    private static final long POST_COMPLETE_MIN_GAP_MS = 3L * 60 * 60 * 1000L;
+    private static final long POWER_SAVE_MIN_GAP_MS = 2L * 60 * 60 * 1000L;
+    private static final int LOW_BATTERY_SKIP_PCT = 15;
     private static final long WATCHDOG_TIMEOUT_MS = 55_000L;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -56,6 +66,7 @@ public class TimecardSyncJobService extends JobService {
     private Runnable watchdogRunnable;
 
     private String preStoreJson = "";
+    private String pendingPageFingerprint = "";
     private final List<CapturedWeek> capturedWeeks = new ArrayList<>();
     private final Set<String> capturedWeekKeys = new HashSet<>();
 
@@ -69,13 +80,13 @@ public class TimecardSyncJobService extends JobService {
         }
     }
 
-    /** Schedules periodic closed-app checks without resetting an already-active job timer. */
+    /** Schedules periodic closed-app checks without resetting an existing matching schedule. */
     public static void schedule(Context context) {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler == null) return;
 
         JobInfo pending = scheduler.getPendingJob(JOB_ID);
-        if (pending != null && pending.isPeriodic()) {
+        if (pending != null && pending.isPeriodic() && pending.getIntervalMillis() == PERIODIC_INTERVAL_MS) {
             return;
         }
 
@@ -103,18 +114,72 @@ public class TimecardSyncJobService extends JobService {
             return false;
         }
 
+        String storeSnapshot = PortalHelper.readFileString(this, PortalHelper.STORE_FILENAME);
+        if (shouldSkipForBatteryEfficiency(storeSnapshot)) {
+            return false;
+        }
+
         isFinished = false;
         bridgeIngestStarted = false;
         interactiveLoginHits = 0;
         capturedWeeks.clear();
         capturedWeekKeys.clear();
-        preStoreJson = PortalHelper.readFileString(this, PortalHelper.STORE_FILENAME);
+        pendingPageFingerprint = "";
+        preStoreJson = storeSnapshot;
 
         watchdogRunnable = () -> finishJobCleanly(params, false);
         mainHandler.postDelayed(watchdogRunnable, WATCHDOG_TIMEOUT_MS);
 
         mainHandler.post(() -> runHeadlessCheck(params));
         return true;
+    }
+
+    /** Zero-WebView pre-flight check to conserve battery when low, in power saver, or already synced today. */
+    private boolean shouldSkipForBatteryEfficiency(String storeJson) {
+        try {
+            Intent batteryIntent = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            boolean isCharging = false;
+            int batteryPct = -1;
+            if (batteryIntent != null) {
+                int status = batteryIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING
+                        || status == BatteryManager.BATTERY_STATUS_FULL;
+                int level = batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = batteryIntent.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+                if (level >= 0 && scale > 0) {
+                    batteryPct = (level * 100) / scale;
+                }
+            }
+
+            if (!isCharging && batteryPct >= 0 && batteryPct < LOW_BATTERY_SKIP_PCT) {
+                return true;
+            }
+
+            SharedPreferences prefs = getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE);
+            long lastSyncMs = Math.max(
+                    prefs.getLong(PortalHelper.PREF_LAST_BG_SYNC_MS, 0L),
+                    PortalHelper.getStoreLastModified(this)
+            );
+            if (lastSyncMs <= 0L) {
+                return false;
+            }
+
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            boolean powerSave = pm != null && pm.isPowerSaveMode();
+
+            long minGapMs = ACTIVE_MIN_GAP_MS;
+            if (!isCharging) {
+                if (powerSave) {
+                    minGapMs = POWER_SAVE_MIN_GAP_MS;
+                } else if (isTodayShiftCompletedInStore(storeJson)) {
+                    minGapMs = POST_COMPLETE_MIN_GAP_MS;
+                }
+            }
+
+            return (System.currentTimeMillis() - lastSyncMs) < minGapMs;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Override
@@ -182,6 +247,7 @@ public class TimecardSyncJobService extends JobService {
                 "    }" +
                 "    var sel = document.querySelector('.timecard-date-dropdown select');" +
                 "    var selectedWeek = sel && sel.value ? sel.value.trim() : '';" +
+                "    var statusText = (sel && sel.selectedIndex >= 0) ? (sel.options[sel.selectedIndex].text || '').trim() : '';" +
                 "    var opts = [];" +
                 "    if (sel) {" +
                 "      for (var i = 0; i < sel.options.length; i++) {" +
@@ -189,7 +255,23 @@ public class TimecardSyncJobService extends JobService {
                 "        if (v) opts.push(v);" +
                 "      }" +
                 "    }" +
-                "    return JSON.stringify({ready: true, selectedWeek: selectedWeek, weekOptions: opts});" +
+                "    var grossEl = document.querySelector('.weekGrossPay');" +
+                "    var hrsEl = document.querySelector('.weekTotalHours');" +
+                "    var updEl = document.querySelector('.timecard-wrapper__lastUpdated');" +
+                "    var rowSigs = [];" +
+                "    for (var r = 0; r < rows.length; r++) {" +
+                "      rowSigs.push((rows[r].getAttribute('data-date') || '') + ':' + (rows[r].innerText || '').replace(/\\s+/g, ' ').trim());" +
+                "    }" +
+                "    var corrEl = document.querySelector('.corrections-wrapper, #correctionsTable');" +
+                "    var domSignature = [" +
+                "      selectedWeek, statusText," +
+                "      grossEl ? grossEl.innerText.trim() : ''," +
+                "      hrsEl ? hrsEl.innerText.trim() : ''," +
+                "      updEl ? updEl.innerText.trim() : ''," +
+                "      rowSigs.join(';')," +
+                "      corrEl ? corrEl.innerText.replace(/\\s+/g, ' ').trim() : ''" +
+                "    ].join('|');" +
+                "    return JSON.stringify({ready: true, selectedWeek: selectedWeek, weekOptions: opts, domSignature: domSignature});" +
                 "  } catch(e) { return JSON.stringify({ready: false}); }" +
                 "})();";
 
@@ -202,6 +284,26 @@ public class TimecardSyncJobService extends JobService {
                     PortalHelper.setAuthenticatedFlag(TimecardSyncJobService.this, true);
                     String selectedWeek = res.optString("selectedWeek", "");
                     List<String> weekOptions = jsonArrayToList(res.optJSONArray("weekOptions"));
+                    String domSig = res.optString("domSignature", "");
+                    pendingPageFingerprint = selectedWeek + ":" + sha256Hex(domSig);
+
+                    SharedPreferences prefs = getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE);
+                    String lastFp = prefs.getString(PortalHelper.PREF_LAST_PAGE_FINGERPRINT, "");
+                    boolean needsRollover = weekOptions.size() >= 2 && isWeekNeedingRolloverCheck(weekOptions.get(1));
+
+                    // Short-circuit: if DOM matches saved fingerprint and week is on disk, skip accordions & bridgeWebView
+                    if (!domSig.isEmpty()
+                            && !needsRollover
+                            && pendingPageFingerprint.equals(lastFp)
+                            && hasWeekInStore(preStoreJson, selectedWeek)) {
+                        prefs.edit()
+                                .putLong(PortalHelper.PREF_LAST_BG_SYNC_MS, System.currentTimeMillis())
+                                .apply();
+                        CookieManager.getInstance().flush();
+                        finishJobCleanly(params, false);
+                        return;
+                    }
+
                     expandAccordionsAndCapture(params, selectedWeek, weekOptions, false);
                     return;
                 }
@@ -446,10 +548,13 @@ public class TimecardSyncJobService extends JobService {
                             PortalHelper.STORE_FILENAME
                     );
                     notifyForChanges(res.optJSONArray("new_timecards"), preStoreJson, postStoreJson);
-                    getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE)
+                    SharedPreferences.Editor editor = getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE)
                             .edit()
-                            .putLong(PREF_LAST_BG_SYNC_MS, System.currentTimeMillis())
-                            .apply();
+                            .putLong(PortalHelper.PREF_LAST_BG_SYNC_MS, System.currentTimeMillis());
+                    if (pendingPageFingerprint != null && !pendingPageFingerprint.isEmpty()) {
+                        editor.putString(PortalHelper.PREF_LAST_PAGE_FINGERPRINT, pendingPageFingerprint);
+                    }
+                    editor.apply();
                 }
             } catch (Exception ignored) {}
 
@@ -632,6 +737,42 @@ public class TimecardSyncJobService extends JobService {
         if (shift == null) return false;
         return shift.optDouble("total_hours", 0.0) > 0.005
                 && !shift.optString("end_time_clock", "").isEmpty();
+    }
+
+    private static boolean isTodayShiftCompletedInStore(String storeJson) {
+        if (storeJson == null || storeJson.trim().isEmpty()) return false;
+        try {
+            String todayIso = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+            Map<String, JSONObject> shifts = indexShiftsByDate(new JSONObject(storeJson));
+            return isShiftComplete(shifts.get(todayIso));
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static boolean hasWeekInStore(String storeJson, String weekEndDate) {
+        if (storeJson == null || storeJson.trim().isEmpty() || weekEndDate == null || weekEndDate.isEmpty()) {
+            return false;
+        }
+        try {
+            JSONObject details = new JSONObject(storeJson).optJSONObject("week_details");
+            return details != null && details.has(weekEndDate);
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static String sha256Hex(String input) {
+        if (input == null || input.isEmpty()) return "";
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                hex.append(String.format(Locale.US, "%02x", b & 0xff));
+            }
+            return hex.toString();
+        } catch (Exception e) {
+            return String.valueOf(input.hashCode());
+        }
     }
 
     private static List<String> jsonArrayToList(JSONArray arr) {

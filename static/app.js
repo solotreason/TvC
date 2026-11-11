@@ -65,9 +65,10 @@ function refreshBatteryOptimizationNotice() {
   const banner = document.getElementById('batteryOptNotice');
   if (!banner) return;
   try {
+    const dismissed = localStorage.getItem('tvc_battery_tip_dismissed') === '1';
     const canCheck = typeof window.AndroidNative !== 'undefined'
       && typeof window.AndroidNative.isIgnoringBatteryOptimizations === 'function';
-    if (!canCheck || !isUserLoggedIn) {
+    if (dismissed || !canCheck || !isUserLoggedIn) {
       banner.classList.add('hidden');
       return;
     }
@@ -1465,12 +1466,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const batteryBanner = document.getElementById('batteryOptNotice');
   if (batteryBanner) {
-    batteryBanner.addEventListener('click', () => {
+    batteryBanner.addEventListener('click', (e) => {
+      if (e.target && e.target.closest && e.target.closest('#dismissBatteryOptBtn')) return;
       try {
         if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.requestIgnoreBatteryOptimizations === 'function') {
           window.AndroidNative.requestIgnoreBatteryOptimizations();
         }
-      } catch (e) {}
+      } catch (e2) {}
+    });
+  }
+
+  const dismissBatteryBtn = document.getElementById('dismissBatteryOptBtn');
+  if (dismissBatteryBtn) {
+    dismissBatteryBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      try { localStorage.setItem('tvc_battery_tip_dismissed', '1'); } catch (e2) {}
+      if (batteryBanner) batteryBanner.classList.add('hidden');
     });
   }
 

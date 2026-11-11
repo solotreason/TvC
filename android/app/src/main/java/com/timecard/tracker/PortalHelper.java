@@ -48,6 +48,8 @@ final class PortalHelper {
     static final String PORTAL_CFG_FILENAME = "portal_config.json";
     static final String OTA_DIR_NAME = "ota_bundle";
     static final String PREFS_NAME = "tvc_prefs";
+    static final String PREF_LAST_BG_SYNC_MS = "last_bg_sync_ms";
+    static final String PREF_LAST_PAGE_FINGERPRINT = "last_page_fingerprint_v1";
 
     static final String EXTRA_WEEK_END_DATE = "EXTRA_WEEK_END_DATE";
     static final String EXTRA_SHIFT_DATE = "EXTRA_SHIFT_DATE";
@@ -501,6 +503,17 @@ final class PortalHelper {
                 map.put(k, obj);
             }
         }
+    }
+
+    /** Clears cached background sync timestamps and page fingerprints cleanly on logout. */
+    static void clearBackgroundSyncPrefs(Context context) {
+        try {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .remove(PREF_LAST_BG_SYNC_MS)
+                    .remove(PREF_LAST_PAGE_FINGERPRINT)
+                    .apply();
+        } catch (Exception ignored) {}
     }
 
     /** Returns true if Android battery optimization is disabled ("Unrestricted") for this app. */

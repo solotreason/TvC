@@ -2,7 +2,21 @@
 
 ## Status & Phases
 
-### Current Sprint: True Closed-App Background Sync & Instant Disk Refresh (v2.4.3)
+### Current Sprint: Battery-Smart Closed-App Background Sync (v2.4.4)
+
+- [x] 1. **Zero-WebView Adaptive Battery Gate (`TimecardSyncJobService.java`)**:
+  - Updated periodic `JobScheduler` interval to 30m (10m flex) and verified existing interval before rescheduling.
+  - Added `shouldSkipForBatteryEfficiency` pre-flight gate before any WebView creation: skips when battery < 15% and unplugged, throttles to 2h in Battery Saver mode, and slows to 3h once today's completed shift is saved (staying at active ~30m checks while waiting or charging).
+
+- [x] 2. **Unchanged-DOM Fingerprint Short-Circuit (`TimecardSyncJobService.java` + `PortalHelper.java`)**:
+  - Computed SHA-256 fingerprint of weekly summary + daily rows + last-updated header inside `headlessWebView` before clicking accordions.
+  - When unchanged (and no non-finalized rollover week exists), skips accordion expansion, skips `outerHTML` serialization, and skips launching `bridgeWebView` completely.
+  - Cleared background sync prefs/fingerprints cleanly on logout (`PortalHelper.clearBackgroundSyncPrefs`).
+
+- [x] 3. **Dismissible Battery Advisory Banner & Version Sync (`static/index.html` + `static/app.js`)**:
+  - Added dismiss button (`#dismissBatteryOptBtn`) remembered in `localStorage`.
+
+### Completed Sprint: True Closed-App Background Sync & Instant Disk Refresh (v2.4.3)
 
 - [x] 1. **Shared Portal & Storage Helper (`PortalHelper.java`)**:
   - Extracted shared constants (`STORE_FILENAME`, `ARCHIVE_FILENAME`, `OTA_DIR_NAME`, `AUTH_MARKER_FILENAME`, `NOTIFICATION_CHANNEL_ID`, portal URL resolution) and synchronized atomic JSON file read/write utilities (`readFileFully`, `writeTextFileAtomic`).

@@ -23,7 +23,11 @@
 
 - [x] 4. **Verify, Package OTA, Build APK & Push (v2.4.6)**:
   - Added unit tests in `tests/test_features.py` covering completed-only shift detection (ignoring clock-in-only), Option Day pay code detection, and Option Day entitlement bank drop detection.
-  - Ran `python -m unittest discover tests -v` (20/20 passed), `python run.py --pack-ota` (`191.6 KB`), `python run.py --build-apk` (`Timecard-Tracker.apk`, `0.28 MB`, `BUILD SUCCESSFUL`), and pushed to `origin/main`.
+  - Fixed OTA update check staleness in `MainActivity.java`, `backend/app.py`, and `run.py`:
+    - Prioritized cache-busted `https://raw.githubusercontent.com/solotreason/TvC/main/version.json?t=<timestamp>` and `static/ota_bundle.zip?t=<build>` ahead of `cdn.jsdelivr.net` (which caches `@main` for up to 12–24h unless purged).
+    - Added `Cache-Control: no-cache` headers and `setUseCaches(false)` on OTA HTTP connections.
+    - Updated `run.py --pack-ota` to auto-synchronize `static/index.html`, `MainActivity.java`, and `android/app/build.gradle` with the generated build number, and added `python run.py --purge-cdn` to purge jsDelivr's edge cache for devices still on older APKs.
+  - Ran `python -m unittest discover tests -v` (20/20 passed), `python run.py --pack-ota` (`191.6 KB`, Build `2026111404`), `python run.py --build-apk` (`Timecard-Tracker.apk`, `0.28 MB`, `BUILD SUCCESSFUL`), pushed to `origin/main`, and purged jsDelivr edge cache.
 
 ### Completed Sprint: 10-Min Fast Background Check, Adaptive Launcher Icon & Transparent Notification Logo (v2.4.5)
 

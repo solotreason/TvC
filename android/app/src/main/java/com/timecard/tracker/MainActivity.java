@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026111304L;
+    private static final long APP_BASE_BUILD = 2026111404L;
     private static final String APP_BASE_VERSION = "2.4.6";
 
     private WebView dashboardWebView;
@@ -381,9 +381,12 @@ public class MainActivity extends Activity {
             try {
                 URL url = new URL(urlStr);
                 conn = (HttpURLConnection) url.openConnection();
+                conn.setUseCaches(false);
                 conn.setConnectTimeout(timeoutMs);
                 conn.setReadTimeout(timeoutMs + 1000);
                 conn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
+                conn.setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate");
+                conn.setRequestProperty("Pragma", "no-cache");
                 int code = conn.getResponseCode();
                 if (code == 200) {
                     try (InputStream in = conn.getInputStream();
@@ -412,9 +415,12 @@ public class MainActivity extends Activity {
             try {
                 URL url = new URL(urlStr);
                 conn = (HttpURLConnection) url.openConnection();
+                conn.setUseCaches(false);
                 conn.setConnectTimeout(timeoutMs);
                 conn.setReadTimeout(timeoutMs + 8000);
                 conn.setRequestProperty("User-Agent", "TvC-Android/" + APP_BASE_VERSION);
+                conn.setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate");
+                conn.setRequestProperty("Pragma", "no-cache");
                 int code = conn.getResponseCode();
                 if (code == 200) {
                     try (InputStream zin = conn.getInputStream();
@@ -444,8 +450,8 @@ public class MainActivity extends Activity {
             try {
                 String repo = getActiveGitHubRepo();
                 String[] candidateVersionUrls = new String[] {
-                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/version.json",
-                        "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + System.currentTimeMillis()
+                        "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + System.currentTimeMillis(),
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/version.json?t=" + System.currentTimeMillis()
                 };
 
                 String jsonStr = fetchJsonWithFailover(candidateVersionUrls, 3500);
@@ -497,9 +503,10 @@ public class MainActivity extends Activity {
                 }
 
                 File zipFile = new File(getFilesDir(), "ota_temp.zip");
+                String cacheBustedBundleUrl = bundleUrl + (bundleUrl.contains("?") ? "&t=" : "?t=") + remoteBuild;
                 String[] candidateBundleUrls = new String[] {
-                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/static/ota_bundle.zip",
-                        bundleUrl
+                        cacheBustedBundleUrl,
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/static/ota_bundle.zip?t=" + remoteBuild
                 };
 
                 boolean downloaded = downloadBundleWithFailover(candidateBundleUrls, zipFile, 8000);

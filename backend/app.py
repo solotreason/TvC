@@ -384,8 +384,8 @@ def get_ota_status():
         except Exception:
             pass
     return {
-        "version": "2.4.5",
-        "build": 2026111302,
+        "version": "2.4.6",
+        "build": 2026111404,
         "github_repo": "solotreason/TvC",
         "release_notes": "OTA Live Update Active"
     }
@@ -393,39 +393,52 @@ def get_ota_status():
 
 @app.post("/api/ota/check")
 def check_ota_updates():
-    try:
-        import urllib.request
-        req = urllib.request.Request(
-            "https://cdn.jsdelivr.net/gh/solotreason/TvC@main/version.json",
-            headers={"User-Agent": "TvC-Web/2.4.5"}
-        )
-        with urllib.request.urlopen(req, timeout=3.5) as resp:
-            remote = json.loads(resp.read().decode("utf-8"))
-            local_meta = get_ota_status()
-            remote_build = int(remote.get("build", 0))
-            local_build = int(local_meta.get("build", 0))
-            if remote_build > local_build:
+    import time
+    import urllib.request
+    local_meta = get_ota_status()
+    repo = local_meta.get("github_repo", "solotreason/TvC")
+    ts = int(time.time() * 1000)
+    candidate_urls = [
+        f"https://raw.githubusercontent.com/{repo}/main/version.json?t={ts}",
+        f"https://cdn.jsdelivr.net/gh/{repo}@main/version.json",
+    ]
+    for url in candidate_urls:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "TvC-Web/2.4.6",
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                remote = json.loads(resp.read().decode("utf-8"))
+                remote_build = int(remote.get("build", 0))
+                local_build = int(local_meta.get("build", 0))
+                if remote_build > local_build:
+                    return {
+                        "status": "OK",
+                        "update_available": True,
+                        "version": remote.get("version"),
+                        "build": remote_build,
+                        "notes": remote.get("release_notes", "")
+                    }
                 return {
                     "status": "OK",
-                    "update_available": True,
-                    "version": remote.get("version"),
-                    "build": remote_build,
-                    "notes": remote.get("release_notes", "")
+                    "up_to_date": True,
+                    "version": local_meta.get("version", "2.4.6"),
+                    "build": local_build
                 }
-            return {
-                "status": "OK",
-                "up_to_date": True,
-                "version": local_meta.get("version", "2.4.5"),
-                "build": local_build
-            }
-    except Exception:
-        local_meta = get_ota_status()
-        return {
-            "status": "OK",
-            "up_to_date": True,
-            "version": local_meta.get("version", "2.4.5"),
-            "build": int(local_meta.get("build", 0))
-        }
+        except Exception:
+            continue
+
+    return {
+        "status": "OK",
+        "up_to_date": True,
+        "version": local_meta.get("version", "2.4.6"),
+        "build": int(local_meta.get("build", 0))
+    }
 
 
 @app.get("/sw.js")

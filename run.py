@@ -112,11 +112,28 @@ def build_android_apk():
         print(f"\nSUCCESS! Standalone Android APK built at:\n  {dest_apk} ({size_mb:.2f} MB)")
 
 
+def purge_jsdelivr_cdn(repo: str = "solotreason/TvC"):
+    """Purges jsDelivr edge cache for version.json and static/ota_bundle.zip so older APKs see updates immediately."""
+    import urllib.request
+    urls = [
+        f"https://purge.jsdelivr.net/gh/{repo}@main/version.json",
+        f"https://purge.jsdelivr.net/gh/{repo}@main/static/ota_bundle.zip",
+    ]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "TvC-Packer/2.4.6"})
+            with urllib.request.urlopen(req, timeout=8.0) as resp:
+                print(f"  Purged CDN cache: {url} (HTTP {resp.status})")
+        except Exception as e:
+            print(f"  Note: Could not purge {url}: {e}")
+
+
 def pack_ota(version: str = None, notes: str = None):
     """Packs static/ directory into static/ota_bundle.zip and updates version.json."""
     import zipfile
     import json
     import time
+    import re
 
     root_dir = os.path.dirname(os.path.abspath(__file__))
     static_dir = os.path.join(root_dir, "static")
@@ -156,6 +173,52 @@ def pack_ota(version: str = None, notes: str = None):
     data["apk_url"] = f"https://github.com/{data['github_repo']}/releases/latest/download/Timecard-Tracker.apk"
     data["min_apk_version"] = data.get("min_apk_version", 1)
 
+    # Synchronize version & build numbers across index.html, MainActivity.java, and build.gradle
+    index_html_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_html_path):
+        with open(index_html_path, "r", encoding="utf-8") as f:
+            html_txt = f.read()
+        html_txt = re.sub(
+            r'(<span[^>]*id="otaModalVersion"[^>]*>)v?[0-9.]+(</span>)',
+            rf'\g<1>v{data["version"]}\g<2>',
+            html_txt
+        )
+        html_txt = re.sub(
+            r'(<span[^>]*id="otaModalBuild"[^>]*>)[0-9]+(</span>)',
+            rf'\g<1>{data["build"]}\g<2>',
+            html_txt
+        )
+        with open(index_html_path, "w", encoding="utf-8") as f:
+            f.write(html_txt)
+
+    main_java_path = os.path.join(
+        root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "MainActivity.java"
+    )
+    if os.path.exists(main_java_path):
+        with open(main_java_path, "r", encoding="utf-8") as f:
+            java_txt = f.read()
+        java_txt = re.sub(
+            r'APP_BASE_BUILD\s*=\s*[0-9]+L;',
+            f'APP_BASE_BUILD = {data["build"]}L;',
+            java_txt
+        )
+        java_txt = re.sub(
+            r'APP_BASE_VERSION\s*=\s*"[^"]+";',
+            f'APP_BASE_VERSION = "{data["version"]}";',
+            java_txt
+        )
+        with open(main_java_path, "w", encoding="utf-8") as f:
+            f.write(java_txt)
+
+    gradle_path = os.path.join(root_dir, "android", "app", "build.gradle")
+    if os.path.exists(gradle_path):
+        with open(gradle_path, "r", encoding="utf-8") as f:
+            gradle_txt = f.read()
+        gradle_txt = re.sub(r'versionCode\s+[0-9]+', f'versionCode {data["build"]}', gradle_txt)
+        gradle_txt = re.sub(r'versionName\s+"[^"]+"', f'versionName "{data["version"]}"', gradle_txt)
+        with open(gradle_path, "w", encoding="utf-8") as f:
+            f.write(gradle_txt)
+
     # Save version.json to root
     with open(v_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -192,6 +255,7 @@ def pack_ota(version: str = None, notes: str = None):
     print(f"    git add .")
     print(f"    git commit -m \"OTA update v{data['version']} (build {data['build']})\"")
     print(f"    git push origin main")
+    print(f"    python run.py --purge-cdn")
     print(f"=======================================================\n")
 
 
@@ -245,6 +309,7 @@ def main():
     parser.add_argument("--seed-sample", action="store_true", help="Seed database with sample data")
     parser.add_argument("--build-apk", action="store_true", help="Build standalone Android APK")
     parser.add_argument("--pack-ota", action="store_true", help="Package static/ for GitHub OTA live update (updates version.json & ota_bundle.zip)")
+    parser.add_argument("--purge-cdn", action="store_true", help="Purge jsDelivr CDN cache for version.json and static/ota_bundle.zip")
     parser.add_argument("--ver", type=str, default=None, help="Set version string for OTA package (e.g. 2.4.1)")
     parser.add_argument("--notes", type=str, default=None, help="Set release notes description for OTA package")
     parser.add_argument("--port", type=int, default=8000, help="Web server port (default: 8000)")
@@ -254,6 +319,12 @@ def main():
 
     if args.pack_ota:
         pack_ota(version=args.ver, notes=args.notes)
+        if args.purge_cdn:
+            purge_jsdelivr_cdn()
+        return
+
+    if args.purge_cdn:
+        purge_jsdelivr_cdn()
         return
 
     if args.seed_sample:

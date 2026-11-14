@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -40,9 +41,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Closed-app periodic JobService that scrapes updated timecard HTML in the background,
- * uses adaptive battery/shift throttling and an unchanged-DOM fingerprint short-circuit,
- * invokes the shared android_bridge.js engine only when data changes, and posts alerts.
+ * Closed-app periodic JobService that scrapes updated timecard & time-off HTML in the background,
+ * uses smart shift-aware battery throttling and unchanged-DOM fingerprint short-circuiting,
+ * invokes the shared android_bridge.js engine only when data changes, and posts precision alerts
+ * strictly for: (1) completed daily timecards, (2) supervisor punch modifications, and (3) Option Day usage.
  */
 public class TimecardSyncJobService extends JobService {
 
@@ -52,11 +54,16 @@ public class TimecardSyncJobService extends JobService {
     private static final String PREF_NOTIFIED_SIGNATURES = "notified_shift_signatures_v2";
     private static final long PERIODIC_INTERVAL_MS = 15 * 60 * 1000L;
     private static final long PERIODIC_FLEX_MS = 5 * 60 * 1000L;
+    private static final long PRIME_CHECK_DELAY_MS = 5 * 60 * 1000L;
+    private static final long PRIME_CHECK_DEADLINE_MS = 8 * 60 * 1000L;
     private static final long FAST_CHECK_DELAY_MS = 10 * 60 * 1000L;
     private static final long FAST_CHECK_DEADLINE_MS = 12 * 60 * 1000L;
+    private static final long PRIME_MIN_GAP_MS = 4 * 60 * 1000L;
     private static final long ACTIVE_MIN_GAP_MS = 8 * 60 * 1000L;
+    private static final long OVERNIGHT_MIN_GAP_MS = 2L * 60 * 60 * 1000L;
     private static final long POST_COMPLETE_MIN_GAP_MS = 3L * 60 * 60 * 1000L;
     private static final long POWER_SAVE_MIN_GAP_MS = 2L * 60 * 60 * 1000L;
+    private static final long TIMEOFF_CHECK_INTERVAL_MS = 30 * 60 * 1000L;
     private static final int LOW_BATTERY_SKIP_PCT = 15;
     private static final long WATCHDOG_TIMEOUT_MS = 55_000L;
 
@@ -70,6 +77,8 @@ public class TimecardSyncJobService extends JobService {
 
     private String preStoreJson = "";
     private String pendingPageFingerprint = "";
+    private String pendingTimeoffFingerprint = "";
+    private String capturedTimeoffHtml = "";
     private final List<CapturedWeek> capturedWeeks = new ArrayList<>();
     private final Set<String> capturedWeekKeys = new HashSet<>();
 
@@ -83,7 +92,7 @@ public class TimecardSyncJobService extends JobService {
         }
     }
 
-    /** Schedules periodic closed-app checks (15m safety net) + 10m deadline-bounded fast check when waiting. */
+    /** Schedules periodic closed-app checks (15m safety net) + shift-aware fast check when waiting. */
     public static void schedule(Context context) {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler == null) return;
@@ -111,16 +120,21 @@ public class TimecardSyncJobService extends JobService {
         try {
             if (!PortalHelper.checkCookiesLoggedIn(context)) return;
             String storeJson = PortalHelper.readFileString(context, PortalHelper.STORE_FILENAME);
-            if (isTodayShiftCompletedInStore(storeJson)) {
+            if (isTodayShiftCompletedInStore(storeJson) || isOvernightQuietWindow(storeJson)) {
                 scheduler.cancel(FAST_JOB_ID);
                 return;
             }
-            if (scheduler.getPendingJob(FAST_JOB_ID) != null) {
+            boolean inPrimeWindow = isPrimePostShiftWindow(storeJson);
+            long targetDelay = inPrimeWindow ? PRIME_CHECK_DELAY_MS : FAST_CHECK_DELAY_MS;
+            long targetDeadline = inPrimeWindow ? PRIME_CHECK_DEADLINE_MS : FAST_CHECK_DEADLINE_MS;
+
+            JobInfo existingFast = scheduler.getPendingJob(FAST_JOB_ID);
+            if (existingFast != null && existingFast.getMinLatencyMillis() <= targetDelay) {
                 return;
             }
             JobInfo fastJob = new JobInfo.Builder(FAST_JOB_ID, serviceComponent)
-                    .setMinimumLatency(FAST_CHECK_DELAY_MS)
-                    .setOverrideDeadline(FAST_CHECK_DEADLINE_MS)
+                    .setMinimumLatency(targetDelay)
+                    .setOverrideDeadline(targetDeadline)
                     .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                     .setPersisted(true)
                     .build();
@@ -155,6 +169,8 @@ public class TimecardSyncJobService extends JobService {
         capturedWeeks.clear();
         capturedWeekKeys.clear();
         pendingPageFingerprint = "";
+        pendingTimeoffFingerprint = "";
+        capturedTimeoffHtml = "";
         preStoreJson = storeSnapshot;
 
         watchdogRunnable = () -> finishJobCleanly(params, false);
@@ -164,7 +180,7 @@ public class TimecardSyncJobService extends JobService {
         return true;
     }
 
-    /** Zero-WebView pre-flight check to conserve battery when low, in power saver, or already synced today. */
+    /** Zero-WebView pre-flight check to conserve battery when low, in power saver, overnight, or already synced today. */
     private boolean shouldSkipForBatteryEfficiency(String storeJson) {
         try {
             Intent batteryIntent = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
@@ -196,13 +212,16 @@ public class TimecardSyncJobService extends JobService {
 
             PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
             boolean powerSave = pm != null && pm.isPowerSaveMode();
+            boolean inPrimeWindow = isPrimePostShiftWindow(storeJson);
 
-            long minGapMs = ACTIVE_MIN_GAP_MS;
+            long minGapMs = inPrimeWindow ? PRIME_MIN_GAP_MS : ACTIVE_MIN_GAP_MS;
             if (!isCharging) {
                 if (powerSave) {
                     minGapMs = POWER_SAVE_MIN_GAP_MS;
                 } else if (isTodayShiftCompletedInStore(storeJson)) {
                     minGapMs = POST_COMPLETE_MIN_GAP_MS;
+                } else if (isOvernightQuietWindow(storeJson)) {
+                    minGapMs = OVERNIGHT_MIN_GAP_MS;
                 }
             }
 
@@ -321,7 +340,8 @@ public class TimecardSyncJobService extends JobService {
                     String lastFp = prefs.getString(PortalHelper.PREF_LAST_PAGE_FINGERPRINT, "");
                     boolean needsRollover = weekOptions.size() >= 2 && isWeekNeedingRolloverCheck(weekOptions.get(1));
 
-                    // Short-circuit: if DOM matches saved fingerprint and week is on disk, skip accordions & bridgeWebView
+                    // Short-circuit: if Time Card DOM matches saved fingerprint and week is on disk,
+                    // only check Time Off Viewer if its periodic window is due; otherwise exit with 0 accordions/bridgeWebView
                     if (!domSig.isEmpty()
                             && !needsRollover
                             && pendingPageFingerprint.equals(lastFp)
@@ -329,8 +349,12 @@ public class TimecardSyncJobService extends JobService {
                         prefs.edit()
                                 .putLong(PortalHelper.PREF_LAST_BG_SYNC_MS, System.currentTimeMillis())
                                 .apply();
-                        CookieManager.getInstance().flush();
-                        finishJobCleanly(params, false);
+                        if (shouldCheckTimeOffBank(prefs)) {
+                            loadAndCaptureTimeOff(params);
+                        } else {
+                            CookieManager.getInstance().flush();
+                            finishJobCleanly(params, false);
+                        }
                         return;
                     }
 
@@ -417,9 +441,85 @@ public class TimecardSyncJobService extends JobService {
             if (capturedWeeks.isEmpty()) {
                 finishJobCleanly(params, false);
             } else {
-                ingestCapturedWeeksWithBridge(params);
+                loadAndCaptureTimeOff(params);
             }
         });
+    }
+
+    private boolean shouldCheckTimeOffBank(SharedPreferences prefs) {
+        long lastTimeoffMs = prefs.getLong(PortalHelper.PREF_LAST_TIMEOFF_SYNC_MS, 0L);
+        if (lastTimeoffMs <= 0L || (System.currentTimeMillis() - lastTimeoffMs) >= TIMEOFF_CHECK_INTERVAL_MS) {
+            return true;
+        }
+        return !hasTimeOffEntitlementsInStore(preStoreJson);
+    }
+
+    private void loadAndCaptureTimeOff(final JobParameters params) {
+        if (isFinished || headlessWebView == null) {
+            proceedAfterTimeOffCheck(params);
+            return;
+        }
+        try {
+            headlessWebView.loadUrl(PortalHelper.getTimeoffPortalUrl(this));
+            mainHandler.postDelayed(() -> pollTimeOffReady(params, 0), 900);
+        } catch (Exception e) {
+            proceedAfterTimeOffCheck(params);
+        }
+    }
+
+    private void pollTimeOffReady(final JobParameters params, final int attempt) {
+        if (isFinished || headlessWebView == null) return;
+        if (attempt > 10) {
+            proceedAfterTimeOffCheck(params);
+            return;
+        }
+
+        String checkTimeOffJs = "(function(){" +
+                "  try {" +
+                "    var w = document.querySelector('.timeoff-wrapper');" +
+                "    var loader = document.querySelector('#tovLoader, #toLoader');" +
+                "    var loaderVis = !!(loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none');" +
+                "    var rows = document.querySelectorAll('.timeoff-list-view table tbody tr');" +
+                "    if (!w || loaderVis || rows.length === 0) return JSON.stringify({ready: false});" +
+                "    var sigs = [];" +
+                "    for (var i = 0; i < rows.length; i++) {" +
+                "      sigs.push((rows[i].getAttribute('data-timeoff-type') || '') + ':' + (rows[i].innerText || '').replace(/\\s+/g, ' ').trim());" +
+                "    }" +
+                "    return JSON.stringify({ready: true, sig: sigs.join(';'), html: document.documentElement.outerHTML});" +
+                "  } catch(e) { return JSON.stringify({ready: false}); }" +
+                "})();";
+
+        headlessWebView.evaluateJavascript(checkTimeOffJs, raw -> {
+            if (isFinished) return;
+            try {
+                JSONObject res = new JSONObject(unquoteJsString(raw));
+                if (res.optBoolean("ready", false)) {
+                    String sig = res.optString("sig", "");
+                    String html = res.optString("html", "");
+                    pendingTimeoffFingerprint = sha256Hex(sig);
+
+                    SharedPreferences prefs = getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE);
+                    String lastTimeoffFp = prefs.getString(PortalHelper.PREF_LAST_TIMEOFF_FINGERPRINT, "");
+                    prefs.edit().putLong(PortalHelper.PREF_LAST_TIMEOFF_SYNC_MS, System.currentTimeMillis()).apply();
+
+                    if (!html.isEmpty() && (!pendingTimeoffFingerprint.equals(lastTimeoffFp) || !hasTimeOffEntitlementsInStore(preStoreJson))) {
+                        capturedTimeoffHtml = html;
+                    }
+                    proceedAfterTimeOffCheck(params);
+                    return;
+                }
+            } catch (Exception ignored) {}
+            mainHandler.postDelayed(() -> pollTimeOffReady(params, attempt + 1), 500);
+        });
+    }
+
+    private void proceedAfterTimeOffCheck(final JobParameters params) {
+        if (capturedWeeks.isEmpty() && (capturedTimeoffHtml == null || capturedTimeoffHtml.isEmpty())) {
+            CookieManager.getInstance().flush();
+            finishJobCleanly(params, false);
+        } else {
+            ingestCapturedWeeksWithBridge(params);
+        }
     }
 
     private boolean isWeekNeedingRolloverCheck(String weekEndDate) {
@@ -466,7 +566,7 @@ public class TimecardSyncJobService extends JobService {
     ) {
         if (isFinished || headlessWebView == null) return;
         if (attempt > 15) {
-            ingestCapturedWeeksWithBridge(params);
+            loadAndCaptureTimeOff(params);
             return;
         }
 
@@ -494,7 +594,8 @@ public class TimecardSyncJobService extends JobService {
     /** Executes android_bridge.js inside a local offline WebView to parse & persist captured HTML identically to foreground. */
     @SuppressLint("SetJavaScriptEnabled")
     private void ingestCapturedWeeksWithBridge(final JobParameters params) {
-        if (isFinished || capturedWeeks.isEmpty()) {
+        boolean hasTimeoff = capturedTimeoffHtml != null && !capturedTimeoffHtml.isEmpty();
+        if (isFinished || (capturedWeeks.isEmpty() && !hasTimeoff)) {
             finishJobCleanly(params, false);
             return;
         }
@@ -559,13 +660,21 @@ public class TimecardSyncJobService extends JobService {
                     .append(quoteForJs(w.weekEndDate))
                     .append(");");
         }
+        if (capturedTimeoffHtml != null && !capturedTimeoffHtml.isEmpty()) {
+            js.append("  if (window.TimecardBridge.ingestTimeoffHtml) {");
+            js.append("    window.TimecardBridge.ingestTimeoffHtml(")
+                    .append(quoteForJs(capturedTimeoffHtml))
+                    .append(");");
+            js.append("  }");
+        }
         js.append("  if (window.TimecardBridge.recordBackgroundSyncComplete) {");
         js.append("    window.TimecardBridge.recordBackgroundSyncComplete(")
-                .append(quoteForJs("Background auto-check updated " + capturedWeeks.size() + " week(s)."))
+                .append(quoteForJs("Background auto-check updated " + Math.max(1, capturedWeeks.size()) + " week(s)."))
                 .append(", 'Background Sync');");
         js.append("  }");
         js.append("  var newCards = window.TimecardBridge.getNewTimecardsJson ? window.TimecardBridge.getNewTimecardsJson() : '[]';");
-        js.append("  return JSON.stringify({ok:true, new_timecards: JSON.parse(newCards || '[]')});");
+        js.append("  var optAlerts = window.TimecardBridge.getOptionDayAlertsJson ? window.TimecardBridge.getOptionDayAlertsJson() : '[]';");
+        js.append("  return JSON.stringify({ok:true, new_timecards: JSON.parse(newCards || '[]'), option_day_alerts: JSON.parse(optAlerts || '[]')});");
         js.append("})();");
 
         bridgeWebView.evaluateJavascript(js.toString(), raw -> {
@@ -577,12 +686,20 @@ public class TimecardSyncJobService extends JobService {
                             TimecardSyncJobService.this,
                             PortalHelper.STORE_FILENAME
                     );
-                    notifyForChanges(res.optJSONArray("new_timecards"), preStoreJson, postStoreJson);
+                    notifyForChanges(
+                            res.optJSONArray("new_timecards"),
+                            res.optJSONArray("option_day_alerts"),
+                            preStoreJson,
+                            postStoreJson
+                    );
                     SharedPreferences.Editor editor = getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE)
                             .edit()
                             .putLong(PortalHelper.PREF_LAST_BG_SYNC_MS, System.currentTimeMillis());
                     if (pendingPageFingerprint != null && !pendingPageFingerprint.isEmpty()) {
                         editor.putString(PortalHelper.PREF_LAST_PAGE_FINGERPRINT, pendingPageFingerprint);
+                    }
+                    if (pendingTimeoffFingerprint != null && !pendingTimeoffFingerprint.isEmpty()) {
+                        editor.putString(PortalHelper.PREF_LAST_TIMEOFF_FINGERPRINT, pendingTimeoffFingerprint);
                     }
                     editor.apply();
                 }
@@ -593,8 +710,18 @@ public class TimecardSyncJobService extends JobService {
         });
     }
 
-    /** Fires deduplicated notifications for newly posted or newly completed shifts & punch edits. */
-    private void notifyForChanges(JSONArray bridgeNewTimecards, String beforeJson, String afterJson) {
+    /**
+     * Fires deduplicated notifications strictly for:
+     * (1) Completed daily timecard posted (never incomplete clock-in-only punches),
+     * (2) Supervisor punch modifications (audit_logs), and
+     * (3) Option Day used (either daily timecard Option Day row or Time Off Viewer Option Day balance decrease).
+     */
+    private void notifyForChanges(
+            JSONArray bridgeNewTimecards,
+            JSONArray bridgeOptionAlerts,
+            String beforeJson,
+            String afterJson
+    ) {
         try {
             if (afterJson == null || afterJson.trim().isEmpty()) return;
 
@@ -613,18 +740,19 @@ public class TimecardSyncJobService extends JobService {
 
             if (isInitialBaseline) {
                 for (Map.Entry<String, JSONObject> entry : afterShiftsByDate.entrySet()) {
-                    if (isShiftWorked(entry.getValue())) {
-                        notifiedSet.add(entry.getKey() + "|started");
-                        if (isShiftComplete(entry.getValue())) {
-                            notifiedSet.add(entry.getKey() + "|complete");
-                        }
+                    JSONObject s = entry.getValue();
+                    if (isShiftComplete(s)) {
+                        notifiedSet.add(entry.getKey() + "|complete");
+                    }
+                    if (isOptionDayShift(s)) {
+                        notifiedSet.add(entry.getKey() + "|option_day");
                     }
                 }
                 prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, notifiedSet).apply();
                 return;
             }
 
-            LinkedHashMap<String, JSONObject> shiftsToNotify = new LinkedHashMap<>();
+            LinkedHashMap<String, JSONObject> candidateShifts = new LinkedHashMap<>();
 
             // 1. Shifts flagged directly by TimecardBridge.upsertParsedWeek
             if (bridgeNewTimecards != null) {
@@ -632,56 +760,67 @@ public class TimecardSyncJobService extends JobService {
                     JSONObject item = bridgeNewTimecards.optJSONObject(i);
                     String date = item != null ? item.optString("date", "") : "";
                     if (!date.isEmpty() && afterShiftsByDate.containsKey(date)) {
-                        shiftsToNotify.put(date, afterShiftsByDate.get(date));
+                        candidateShifts.put(date, afterShiftsByDate.get(date));
                     }
                 }
             }
 
-            // 2. Shifts that transitioned from open/0h to completed worked hours since last sync
+            // 2. Shifts that transitioned to completed or Option Day since last sync
             for (Map.Entry<String, JSONObject> entry : afterShiftsByDate.entrySet()) {
                 String date = entry.getKey();
                 JSONObject postShift = entry.getValue();
-                if (!isShiftWorked(postShift)) continue;
-
                 JSONObject preShift = preShiftsByDate.get(date);
-                boolean becameWorked = (preShift == null || !isShiftWorked(preShift));
-                boolean becameCompleted = isShiftComplete(postShift) && (preShift == null || !isShiftComplete(preShift));
 
-                if (becameWorked || becameCompleted) {
-                    shiftsToNotify.put(date, postShift);
+                boolean becameCompleted = isShiftComplete(postShift)
+                        && (preShift == null || !isShiftComplete(preShift));
+                boolean becameOptionDay = isOptionDayShift(postShift)
+                        && (preShift == null || !isOptionDayShift(preShift));
+
+                if (becameCompleted || becameOptionDay) {
+                    candidateShifts.put(date, postShift);
                 }
             }
 
-            List<JSONObject> freshAlerts = new ArrayList<>();
-            for (Map.Entry<String, JSONObject> entry : shiftsToNotify.entrySet()) {
+            List<JSONObject> freshCompletedAlerts = new ArrayList<>();
+            List<JSONObject> freshOptionDayAlerts = new ArrayList<>();
+
+            for (Map.Entry<String, JSONObject> entry : candidateShifts.entrySet()) {
                 String date = entry.getKey();
                 JSONObject s = entry.getValue();
-                boolean complete = isShiftComplete(s);
-                String stageKey = date + (complete ? "|complete" : "|started");
-                if (notifiedSet.contains(stageKey)) continue;
-
-                notifiedSet.add(date + "|started");
-                if (complete) notifiedSet.add(date + "|complete");
-                freshAlerts.add(s);
+                if (isOptionDayShift(s)) {
+                    String optStageKey = date + "|option_day";
+                    if (!notifiedSet.contains(optStageKey)) {
+                        notifiedSet.add(optStageKey);
+                        freshOptionDayAlerts.add(s);
+                    }
+                } else if (isShiftComplete(s)) {
+                    // Only notify when shift is COMPLETED (never on clock-in-only open punch)
+                    String compStageKey = date + "|complete";
+                    if (!notifiedSet.contains(compStageKey)) {
+                        notifiedSet.add(compStageKey);
+                        freshCompletedAlerts.add(s);
+                    }
+                }
             }
 
-            if (!freshAlerts.isEmpty()) {
-                JSONObject latest = freshAlerts.get(freshAlerts.size() - 1);
+            // Trigger (1): Completed daily timecard(s) posted
+            if (!freshCompletedAlerts.isEmpty()) {
+                JSONObject latest = freshCompletedAlerts.get(freshCompletedAlerts.size() - 1);
                 String targetWeekEnd = latest.optString("week_end_date", "");
                 String targetDate = latest.optString("date", "");
-                String title = freshAlerts.size() == 1
-                        ? (isShiftComplete(latest) ? "New Timecard Added (" + targetDate + ")" : "Shift Clock-In Posted (" + targetDate + ")")
-                        : freshAlerts.size() + " New Daily Timecards Added";
+                String title = freshCompletedAlerts.size() == 1
+                        ? "New Timecard Added (" + targetDate + ")"
+                        : freshCompletedAlerts.size() + " New Daily Timecards Added";
 
                 StringBuilder body = new StringBuilder();
-                for (int i = 0; i < freshAlerts.size(); i++) {
+                for (int i = 0; i < freshCompletedAlerts.size(); i++) {
                     if (i > 0) body.append(" | ");
-                    JSONObject s = freshAlerts.get(i);
+                    JSONObject s = freshCompletedAlerts.get(i);
                     String startClk = s.optString("start_time_clock", "");
                     String endClk = s.optString("end_time_clock", "");
                     String punches = (!startClk.isEmpty() && !endClk.isEmpty())
                             ? startClk + " - " + endClk
-                            : (!startClk.isEmpty() ? "Started " + startClk : "Punches posted");
+                            : "Completed";
                     body.append(s.optString("date", ""))
                             .append(": ")
                             .append(punches)
@@ -693,11 +832,145 @@ public class TimecardSyncJobService extends JobService {
                 PortalHelper.postShiftNotification(this, title, body.toString(), targetWeekEnd, targetDate);
             }
 
-            // 3. Punch Audit modifications detected in background
+            // Trigger (3a): Option Day posted on daily timecard row
+            if (!freshOptionDayAlerts.isEmpty()) {
+                JSONObject latestOpt = freshOptionDayAlerts.get(freshOptionDayAlerts.size() - 1);
+                String targetWeekEnd = latestOpt.optString("week_end_date", "");
+                String targetDate = latestOpt.optString("date", "");
+                String title = "Option Day Used (" + targetDate + ")";
+
+                StringBuilder body = new StringBuilder();
+                for (int i = 0; i < freshOptionDayAlerts.size(); i++) {
+                    if (i > 0) body.append(" | ");
+                    JSONObject s = freshOptionDayAlerts.get(i);
+                    String payCode = s.optString("pay_code", "OPTION DAY").trim();
+                    if (payCode.isEmpty()) payCode = "OPTION DAY";
+                    body.append(s.optString("date", ""))
+                            .append(": ")
+                            .append(payCode)
+                            .append(String.format(Locale.US, " (%.2f hrs • $%.2f)",
+                                    s.optDouble("total_hours", 0.0),
+                                    s.optDouble("gross_pay", 0.0)));
+                }
+                String remainingSummary = getRemainingOptionDaySummary(afterStore);
+                if (!remainingSummary.isEmpty()) {
+                    body.append(" • ").append(remainingSummary);
+                }
+                PortalHelper.postShiftNotification(this, title, body.toString(), targetWeekEnd, targetDate);
+            }
+
+            // Trigger (3b): Option Day / Option Week entitlement balance decrease in Time Off Viewer
+            notifyForOptionDayBankChanges(
+                    bridgeOptionAlerts,
+                    beforeStore.optJSONObject("timeoff"),
+                    afterStore.optJSONObject("timeoff"),
+                    !freshOptionDayAlerts.isEmpty(),
+                    notifiedSet
+            );
+
+            // Trigger (2): Supervisor punch modifications detected in background
             notifyForNewAudits(beforeStore.optJSONArray("audit_logs"), afterStore.optJSONArray("audit_logs"), notifiedSet);
 
             prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, notifiedSet).apply();
         } catch (Exception ignored) {}
+    }
+
+    private void notifyForOptionDayBankChanges(
+            JSONArray bridgeOptionAlerts,
+            JSONObject preTimeoff,
+            JSONObject postTimeoff,
+            boolean alreadyNotifiedDailyRow,
+            Set<String> notifiedSet
+    ) {
+        try {
+            List<JSONObject> bankDrops = new ArrayList<>();
+            if (bridgeOptionAlerts != null && bridgeOptionAlerts.length() > 0) {
+                for (int i = 0; i < bridgeOptionAlerts.length(); i++) {
+                    JSONObject obj = bridgeOptionAlerts.optJSONObject(i);
+                    if (obj != null) bankDrops.add(obj);
+                }
+            } else if (preTimeoff != null && postTimeoff != null) {
+                JSONArray preArr = preTimeoff.optJSONArray("entitlements");
+                JSONArray postArr = postTimeoff.optJSONArray("entitlements");
+                if (preArr != null && postArr != null && preArr.length() > 0) {
+                    Map<String, JSONObject> preMap = new LinkedHashMap<>();
+                    for (int i = 0; i < preArr.length(); i++) {
+                        JSONObject e = preArr.optJSONObject(i);
+                        if (e != null) {
+                            preMap.put(e.optString("timeoff_type", "").trim().toUpperCase(Locale.US), e);
+                        }
+                    }
+                    for (int j = 0; j < postArr.length(); j++) {
+                        JSONObject postItem = postArr.optJSONObject(j);
+                        if (postItem == null) continue;
+                        String tType = postItem.optString("timeoff_type", "").trim().toUpperCase(Locale.US);
+                        String title = postItem.optString("title", "").trim();
+                        boolean isOpt = "OPT".equals(tType) || "OPW".equals(tType)
+                                || title.toUpperCase(Locale.US).contains("OPTION");
+                        JSONObject preItem = preMap.get(tType);
+                        if (isOpt && preItem != null) {
+                            double oldAvail = preItem.optDouble("available_time", 0.0);
+                            double newAvail = postItem.optDouble("available_time", 0.0);
+                            if (oldAvail > newAvail + 0.005) {
+                                JSONObject drop = new JSONObject();
+                                drop.put("timeoff_type", tType);
+                                drop.put("title", title.isEmpty() ? "Option Day" : title);
+                                drop.put("old_available", oldAvail);
+                                drop.put("new_available", newAvail);
+                                drop.put("time_basis", postItem.optString("time_basis", "Days"));
+                                bankDrops.add(drop);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (JSONObject drop : bankDrops) {
+                String tType = drop.optString("timeoff_type", "OPT");
+                String title = drop.optString("title", "Option Day");
+                double oldAvail = drop.optDouble("old_available", 0.0);
+                double newAvail = drop.optDouble("new_available", 0.0);
+                String basis = drop.optString("time_basis", "Days");
+                String sig = String.format(Locale.US, "optbank|%s|%.2f->%.2f", tType, oldAvail, newAvail);
+                if (notifiedSet.contains(sig)) continue;
+
+                notifiedSet.add(sig);
+                if (!alreadyNotifiedDailyRow) {
+                    String notifTitle = title + " Used";
+                    String notifBody = String.format(
+                            Locale.US,
+                            "%s balance decreased: %.2f → %.2f %s remaining",
+                            title, oldAvail, newAvail, basis
+                    );
+                    PortalHelper.postShiftNotification(this, notifTitle, notifBody, "", "opt_" + tType);
+                    break;
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static String getRemainingOptionDaySummary(JSONObject store) {
+        if (store == null) return "";
+        try {
+            JSONObject timeoff = store.optJSONObject("timeoff");
+            JSONArray arr = timeoff != null ? timeoff.optJSONArray("entitlements") : null;
+            if (arr == null) return "";
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject e = arr.optJSONObject(i);
+                if (e == null) continue;
+                String tType = e.optString("timeoff_type", "").trim().toUpperCase(Locale.US);
+                String title = e.optString("title", "").trim();
+                if ("OPT".equals(tType) || title.toUpperCase(Locale.US).contains("OPTION DAY")) {
+                    return String.format(
+                            Locale.US,
+                            "Remaining: %.2f %s",
+                            e.optDouble("available_time", 0.0),
+                            e.optString("time_basis", "Days")
+                    );
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
     }
 
     private void notifyForNewAudits(JSONArray preAudits, JSONArray postAudits, Set<String> notifiedSet) {
@@ -757,10 +1030,40 @@ public class TimecardSyncJobService extends JobService {
         return map;
     }
 
-    private static boolean isShiftWorked(JSONObject shift) {
+    private static boolean isOptionDayShift(JSONObject shift) {
         if (shift == null) return false;
-        boolean hasStart = !shift.isNull("start_time_dec") && !shift.optString("start_time_clock", "").isEmpty();
-        return hasStart || shift.optDouble("total_hours", 0.0) > 0.005;
+        if (shift.optBoolean("is_option_day", false)) return true;
+        String raw = shift.optString("pay_code", "").trim().toUpperCase(Locale.US);
+        if (raw.contains("OPTION")
+                || raw.contains("OPT DAY")
+                || raw.contains("OPTDAY")
+                || raw.contains("OPT WK")
+                || raw.contains("OPT WEEK")
+                || "OPT".equals(raw)
+                || "OPW".equals(raw)
+                || raw.startsWith("OPT ")) {
+            return true;
+        }
+        JSONArray details = shift.optJSONArray("details");
+        if (details != null) {
+            for (int i = 0; i < details.length(); i++) {
+                JSONObject det = details.optJSONObject(i);
+                if (det == null) continue;
+                String t = (det.optString("trans_type", "") + " " + det.optString("activity", ""))
+                        .trim()
+                        .toUpperCase(Locale.US);
+                if (t.contains("OPTION")
+                        || t.contains("OPT DAY")
+                        || t.contains("OPTDAY")
+                        || t.contains("OPT WK")
+                        || t.contains("OPT WEEK")
+                        || "OPT".equals(t)
+                        || "OPW".equals(t)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean isShiftComplete(JSONObject shift) {
@@ -774,7 +1077,87 @@ public class TimecardSyncJobService extends JobService {
         try {
             String todayIso = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
             Map<String, JSONObject> shifts = indexShiftsByDate(new JSONObject(storeJson));
-            return isShiftComplete(shifts.get(todayIso));
+            JSONObject todayShift = shifts.get(todayIso);
+            if (todayShift == null) return false;
+            String payCode = todayShift.optString("pay_code", "").trim().toUpperCase(Locale.US);
+            return isShiftComplete(todayShift)
+                    || isOptionDayShift(todayShift)
+                    || payCode.contains("SCHEDULED OFF");
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    /** Returns true when an active clock-in is open or current time is within the learned shift-end window. */
+    private static boolean isPrimePostShiftWindow(String storeJson) {
+        try {
+            if (hasOpenClockInShift(storeJson)) return true;
+            Calendar cal = Calendar.getInstance();
+            int dayOfWeek = cal.get(Calendar.DAY_OF_WEEK);
+            if (dayOfWeek == Calendar.SUNDAY) return false;
+
+            double nowHourDec = cal.get(Calendar.HOUR_OF_DAY) + (cal.get(Calendar.MINUTE) / 60.0);
+            double typicalEnd = estimateTypicalEndHourDec(storeJson);
+            return nowHourDec >= (typicalEnd - 1.5) && nowHourDec <= (typicalEnd + 4.0);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Returns true during 1:00 AM - 5:00 AM local time when no open punch exists. */
+    private static boolean isOvernightQuietWindow(String storeJson) {
+        try {
+            if (hasOpenClockInShift(storeJson)) return false;
+            Calendar cal = Calendar.getInstance();
+            int hour = cal.get(Calendar.HOUR_OF_DAY);
+            return hour >= 1 && hour < 5;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean hasOpenClockInShift(String storeJson) {
+        if (storeJson == null || storeJson.trim().isEmpty()) return false;
+        try {
+            String todayIso = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+            Map<String, JSONObject> shifts = indexShiftsByDate(new JSONObject(storeJson));
+            JSONObject today = shifts.get(todayIso);
+            if (today != null) {
+                boolean hasStart = !today.isNull("start_time_dec") && !today.optString("start_time_clock", "").isEmpty();
+                if (hasStart && !isShiftComplete(today)) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private static double estimateTypicalEndHourDec(String storeJson) {
+        if (storeJson == null || storeJson.trim().isEmpty()) return 19.5;
+        try {
+            Map<String, JSONObject> shifts = indexShiftsByDate(new JSONObject(storeJson));
+            double sum = 0.0;
+            int count = 0;
+            for (JSONObject s : shifts.values()) {
+                if (s != null && isShiftComplete(s) && !s.isNull("end_time_dec")) {
+                    double endDec = s.optDouble("end_time_dec", -1.0);
+                    if (endDec > 0.0 && endDec <= 24.0) {
+                        sum += endDec;
+                        count++;
+                        if (count >= 12) break;
+                    }
+                }
+            }
+            if (count > 0) {
+                return sum / count;
+            }
+        } catch (Exception ignored) {}
+        return 19.5;
+    }
+
+    private static boolean hasTimeOffEntitlementsInStore(String storeJson) {
+        if (storeJson == null || storeJson.trim().isEmpty()) return false;
+        try {
+            JSONObject timeoff = new JSONObject(storeJson).optJSONObject("timeoff");
+            JSONArray arr = timeoff != null ? timeoff.optJSONArray("entitlements") : null;
+            return arr != null && arr.length() > 0;
         } catch (Exception ignored) {}
         return false;
     }

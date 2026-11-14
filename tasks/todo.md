@@ -2,7 +2,30 @@
 
 ## Status & Phases
 
-### Current Sprint: 10-Min Fast Background Check, Adaptive Launcher Icon & Transparent Notification Logo (v2.4.5)
+### Current Sprint: Precision Notifications (Completed Shift, Punch Edits & Option Days) + Shift-Aware Fast Polling (v2.4.6)
+
+- [x] 1. **Option Day & Completed-Only Shift Detection Across Backend, JS Bridge & UI (`backend/database.py`, `static/android_bridge.js`, `static/app.js`)**:
+  - Added `isOptionDayPayCode` / `isOptionDayShift` detection for Option Day & Option Week pay codes (`OPT`, `OPTION DAY`, `OPT DAY`, `OPW`, `OPTION WEEK`, etc.) on daily timecard rows and details.
+  - Updated `upsert_shift` (`backend/database.py`) and `upsertParsedWeek` (`static/android_bridge.js`) so `new_timecards` fires strictly when a shift becomes **completed** (both start & end punches + `total_hours > 0`, never on clock-in-only punches) OR when an **Option Day** is posted on a daily row (even without clock-in/out punches).
+  - Tracked Option Day / Option Week entitlement balance decreases in `upsertParsedTimeoff` (`static/android_bridge.js`) and exposed `getOptionDayAlertsJson` so both foreground and background syncs detect Time Off Viewer Option Day usage.
+  - Updated `notifyDailyTimecardAdded` and `isWaitingForDailyTimecard` in `static/app.js` to format Option Day notifications (`"Option Day Used (<date>)"`) and treat Option Day / Scheduled Off days as finalized for the day.
+
+- [x] 2. **Closed-App Background Notification Filtering & Time Off Bank Sync (`TimecardSyncJobService.java` + `PortalHelper.java`)**:
+  - Updated `TimecardSyncJobService.notifyForChanges` to notify strictly on:
+    1. **Completed daily timecard posted** (never on incomplete clock-in-only punches).
+    2. **Supervisor punch modifications** (`audit_logs` — Start Time, End Time, Meal/Unpaid).
+    3. **Option Day used** — both when a daily timecard row posts with an Option Day / Option Week pay code AND when the Time Off Viewer Option Day / Option Week balance drops.
+  - Extended `TimecardSyncJobService` to periodically/on-change inspect `PortalHelper.getTimeoffPortalUrl` (`time-off-viewer.html`) with DOM fingerprint short-circuiting (`PREF_LAST_TIMEOFF_FINGERPRINT`, `PREF_LAST_TIMEOFF_SYNC_MS`) and ingest via `window.TimecardBridge.ingestTimeoffHtml` in `bridgeWebView`.
+
+- [x] 3. **Smart Shift-Aware Background Polling (`TimecardSyncJobService.java`)**:
+  - Learned typical shift end hour (`estimateTypicalEndHourDec`) from recent completed shifts in `timecard_store_v4.json` (plus active clock-in detection).
+  - Polls at peak speed (`5m` latency / `8m` deadline, `4m` min gap) during the shift-end window or when an active punch is open; polls every `10–12m` during normal daytime while today's card is unposted; throttles to `2h` overnight (`1 AM – 5 AM` when no night shift/open punch) and `3h` once today's timecard or Option Day is posted.
+
+- [x] 4. **Verify, Package OTA, Build APK & Push (v2.4.6)**:
+  - Added unit tests in `tests/test_features.py` covering completed-only shift detection (ignoring clock-in-only), Option Day pay code detection, and Option Day entitlement bank drop detection.
+  - Ran `python -m unittest discover tests -v` (20/20 passed), `python run.py --pack-ota` (`191.6 KB`), `python run.py --build-apk` (`Timecard-Tracker.apk`, `0.28 MB`, `BUILD SUCCESSFUL`), and pushed to `origin/main`.
+
+### Completed Sprint: 10-Min Fast Background Check, Adaptive Launcher Icon & Transparent Notification Logo (v2.4.5)
 
 - [x] 1. **10-Minute Deadline-Bounded Background Sync + 15-Minute Periodic Safety Net (`TimecardSyncJobService.java` + `static/app.js`)**:
   - Switched `PERIODIC_INTERVAL_MS` to 15m (`5m` flex) as a persisted safety net and added `FAST_JOB_ID = 2027` (`10m` minimum latency, `12m` override deadline) that self-chains while waiting for today's shift so checks never drift to 45 minutes.

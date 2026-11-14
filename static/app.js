@@ -21,6 +21,48 @@ function getLocalIsoDate(offsetDays = 0) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function isOptionDayShift(s) {
+  if (!s) return false;
+  if (s.is_option_day) return true;
+  const raw = String(s.pay_code || '').trim().toUpperCase();
+  if (
+    raw.includes('OPTION') ||
+    raw.includes('OPT DAY') ||
+    raw.includes('OPTDAY') ||
+    raw.includes('OPT WK') ||
+    raw.includes('OPT WEEK') ||
+    raw === 'OPT' ||
+    raw === 'OPW' ||
+    raw.startsWith('OPT ')
+  ) {
+    return true;
+  }
+  if (Array.isArray(s.details)) {
+    for (const det of s.details) {
+      const t = `${(det && det.trans_type) || ''} ${(det && det.activity) || ''}`.trim().toUpperCase();
+      if (
+        t.includes('OPTION') ||
+        t.includes('OPT DAY') ||
+        t.includes('OPTDAY') ||
+        t.includes('OPT WK') ||
+        t.includes('OPT WEEK') ||
+        t === 'OPT' ||
+        t === 'OPW'
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isCompletedWorkedShift(s) {
+  if (!s) return false;
+  const hasStart = (s.start_time_dec !== null && s.start_time_dec !== undefined) || !!s.start_time_clock;
+  const hasEnd = (s.end_time_dec !== null && s.end_time_dec !== undefined) || !!s.end_time_clock;
+  return hasStart && hasEnd && (Number(s.total_hours) || 0) > 0.005;
+}
+
 function isWaitingForDailyTimecard() {
   if (!isUserLoggedIn) return false;
 
@@ -39,13 +81,13 @@ function isWaitingForDailyTimecard() {
   }
 
   const todayShift = latestWeek.shifts.find(s => s.date === todayIso);
+  const rawPayCode = todayShift ? String(todayShift.pay_code || '').trim().toUpperCase() : '';
   const todayComplete = !!(
-    todayShift &&
-    todayShift.start_time_dec !== null &&
-    todayShift.start_time_dec !== undefined &&
-    todayShift.end_time_dec !== null &&
-    todayShift.end_time_dec !== undefined &&
-    (todayShift.total_hours || 0) > 0.005
+    todayShift && (
+      isCompletedWorkedShift(todayShift) ||
+      isOptionDayShift(todayShift) ||
+      rawPayCode.includes('SCHEDULED OFF')
+    )
   );
 
   return !todayComplete;
@@ -433,7 +475,10 @@ window.focusShiftFromNotification = async function (weekEndDate, shiftDate) {
 function notifyDailyTimecardAdded(newTimecards, fallbackWeekEndDate = '') {
   if (!Array.isArray(newTimecards) || newTimecards.length === 0) return;
 
-  const freshItems = newTimecards.filter(tc => tc && tc.date && !notifiedShiftDates.has(tc.date));
+  // Notify strictly on completed shifts or Option Day usage (never on clock-in-only open punches)
+  const freshItems = newTimecards.filter(
+    tc => tc && tc.date && !notifiedShiftDates.has(tc.date) && (isCompletedWorkedShift(tc) || isOptionDayShift(tc))
+  );
   if (freshItems.length === 0) return;
 
   freshItems.forEach(tc => notifiedShiftDates.add(tc.date));
@@ -445,16 +490,20 @@ function notifyDailyTimecardAdded(newTimecards, fallbackWeekEndDate = '') {
 
   const lines = freshItems.map(tc => {
     const label = formatShiftDate(tc.date, tc.day_name || '');
-    const punches = (tc.start_time_clock && tc.end_time_clock)
-      ? `${tc.start_time_clock} – ${tc.end_time_clock}`
-      : (tc.start_time_clock ? `Started ${tc.start_time_clock}` : 'Punches posted');
+    const isOpt = isOptionDayShift(tc);
+    const punches = isOpt
+      ? (tc.pay_code || 'OPTION DAY')
+      : `${tc.start_time_clock} – ${tc.end_time_clock}`;
     const hrs = formatDecimal(tc.total_hours || 0);
     const pay = formatCurrency(tc.gross_pay || 0);
     return `${label}: ${punches} (${hrs} hrs • ${pay})`;
   });
 
+  const singleIsOpt = freshItems.length === 1 && isOptionDayShift(freshItems[0]);
   const title = freshItems.length === 1
-    ? `New Timecard Added (${formatShiftDate(freshItems[0].date, freshItems[0].day_name || '')})`
+    ? (singleIsOpt
+      ? `Option Day Used (${formatShiftDate(freshItems[0].date, freshItems[0].day_name || '')})`
+      : `New Timecard Added (${formatShiftDate(freshItems[0].date, freshItems[0].day_name || '')})`)
     : `${freshItems.length} New Daily Timecards Added`;
   const body = lines.join(' | ');
 
@@ -507,9 +556,9 @@ async function loadWeekDetails(weekEndDate, forceRefresh = false) {
     if (!res.ok) throw new Error('Week not found');
     const data = await res.json();
 
-    // Detect if any new daily timecard appeared in an already-known week
+    // Detect if any new completed daily timecard or Option Day appeared in an already-known week
     const activeShifts = (data.shifts || []).filter(
-      s => (s.start_time_dec !== null && s.start_time_dec !== undefined) || (s.total_hours || 0) > 0.005
+      s => isCompletedWorkedShift(s) || isOptionDayShift(s)
     );
     if (knownWorkedDaysByWeek.has(weekEndDate)) {
       const prevSet = knownWorkedDaysByWeek.get(weekEndDate);
@@ -1237,8 +1286,27 @@ async function checkSyncStatus() {
         }
       }
 
+      const hasDailyOptAlert = Array.isArray(data.new_timecards) && data.new_timecards.some(tc => isOptionDayShift(tc));
       if (Array.isArray(data.new_timecards) && data.new_timecards.length > 0) {
         notifyDailyTimecardAdded(data.new_timecards);
+      }
+      if (!hasDailyOptAlert && Array.isArray(data.option_day_alerts) && data.option_day_alerts.length > 0) {
+        const optAlert = data.option_day_alerts[0];
+        const optTitle = `${optAlert.title || 'Option Day'} Used`;
+        const optBody = `${optAlert.title || 'Option Day'} balance decreased: ${formatDecimal(optAlert.old_available)} → ${formatDecimal(optAlert.new_available)} ${optAlert.time_basis || 'Days'} remaining`;
+        const toast = document.getElementById('newTimecardToast');
+        const toastTitle = document.getElementById('newTimecardToastTitle');
+        const toastBody = document.getElementById('newTimecardToastBody');
+        if (toast && toastTitle && toastBody) {
+          toastTitle.textContent = optTitle;
+          toastBody.textContent = optBody;
+          toast.classList.remove('hidden');
+        }
+        try {
+          if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.showTimecardNotificationForShift) {
+            window.AndroidNative.showTimecardNotificationForShift(optTitle, optBody, '', '');
+          }
+        } catch (e) {}
       }
 
       weekDetailsCache.clear();

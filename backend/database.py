@@ -160,12 +160,36 @@ def upsert_week(week_data: Dict[str, Any]):
     conn.close()
 
 
+def is_option_day_pay_code(pay_code: Optional[str], details: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """Returns True if the shift pay_code or detail rows indicate an Option Day or Option Week."""
+    raw = (pay_code or "").strip().upper()
+    if any(tok in raw for tok in ("OPTION", "OPT DAY", "OPTDAY", "OPT WK", "OPT WEEK")) or raw in ("OPT", "OPW") or raw.startswith("OPT "):
+        return True
+    if details:
+        for det in details:
+            t = f"{det.get('trans_type', '')} {det.get('activity', '')}".strip().upper()
+            if any(tok in t for tok in ("OPTION", "OPT DAY", "OPTDAY", "OPT WK", "OPT WEEK")) or t in ("OPT", "OPW"):
+                return True
+    return False
+
+
+def is_shift_completed(shift_row: Optional[Dict[str, Any]]) -> bool:
+    """Returns True when a worked shift has both start & end punches and total_hours > 0."""
+    if not shift_row:
+        return False
+    return (
+        shift_row.get("start_time_dec") is not None
+        and shift_row.get("end_time_dec") is not None
+        and (shift_row.get("total_hours") or 0.0) > 0.005
+    )
+
+
 def upsert_shift(shift_data: Dict[str, Any]) -> bool:
     """
     Insert or update daily shift record.
     Audits ONLY punch changes: Start Time, End Time, and Meal/Unpaid.
-    Returns True if this shift represents a newly added daily timecard
-    for a week that already had shift records in the database.
+    Returns True if this shift represents a newly completed daily timecard
+    or a newly posted Option Day for a week that already had shift records.
     """
     conn = get_connection()
     is_newly_added_timecard = False
@@ -180,13 +204,14 @@ def upsert_shift(shift_data: Dict[str, Any]) -> bool:
             (shift_data["week_end_date"], shift_data["date"])
         ).fetchone()
 
-        was_empty = (existing is None) or (
-            existing["start_time_dec"] is None and (existing["total_hours"] or 0.0) <= 0.005
+        existing_dict = dict(existing) if existing else None
+        was_complete_or_opt = is_shift_completed(existing_dict) or (
+            existing_dict is not None and is_option_day_pay_code(existing_dict.get("pay_code"))
         )
-        has_timecard_now = (shift_data.get("start_time_dec") is not None) or (
-            (shift_data.get("total_hours") or 0.0) > 0.005
+        is_complete_or_opt_now = is_shift_completed(shift_data) or is_option_day_pay_code(
+            shift_data.get("pay_code"), shift_data.get("details")
         )
-        if week_shift_count > 0 and was_empty and has_timecard_now:
+        if week_shift_count > 0 and (not was_complete_or_opt) and is_complete_or_opt_now:
             is_newly_added_timecard = True
 
         if existing:
@@ -312,6 +337,8 @@ def save_parsed_week(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "week_end_date": shift.get("week_end_date") or week_end_date,
                 "date": shift.get("date"),
                 "day_name": shift.get("day_name"),
+                "pay_code": shift.get("pay_code", ""),
+                "is_option_day": is_option_day_pay_code(shift.get("pay_code"), shift.get("details")),
                 "start_time_clock": shift.get("start_time_clock"),
                 "end_time_clock": shift.get("end_time_clock"),
                 "total_hours": shift.get("total_hours", 0.0),
@@ -340,10 +367,22 @@ def insert_correction(corr_data: Dict[str, Any]):
     conn.close()
 
 
-def upsert_entitlements(entitlements_list: List[Dict[str, Any]], profile: Optional[Dict[str, Any]] = None):
-    """Inserts or updates employee leave entitlements bank."""
+def upsert_entitlements(
+    entitlements_list: List[Dict[str, Any]],
+    profile: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Inserts or updates employee leave entitlements bank.
+    Returns any Option Day / Option Week entitlements whose available balance decreased.
+    """
     conn = get_connection()
+    option_day_usages: List[Dict[str, Any]] = []
     with conn:
+        existing_rows = conn.execute(
+            "SELECT timeoff_type, title, available_time, time_basis FROM entitlements"
+        ).fetchall()
+        existing_map = {r["timeoff_type"]: dict(r) for r in existing_rows}
+
         if profile and profile.get("emp_id"):
             conn.execute("""
                 INSERT INTO employee_profile (id, emp_id, emp_name, updated_at)
@@ -355,6 +394,25 @@ def upsert_entitlements(entitlements_list: List[Dict[str, Any]], profile: Option
             """, (profile.get("emp_id"), profile.get("emp_name")))
 
         for item in entitlements_list:
+            t_type = (item.get("timeoff_type") or "").strip().upper()
+            title = (item.get("title") or "").strip()
+            new_avail = float(item.get("available_time") or 0.0)
+            prev = existing_map.get(t_type)
+            is_opt_type = t_type in ("OPT", "OPW") or ("OPTION" in title.upper())
+            if prev is not None and is_opt_type:
+                old_avail = float(prev.get("available_time") or 0.0)
+                if old_avail > new_avail + 0.005:
+                    option_day_usages.append({
+                        "is_option_day": True,
+                        "from_entitlement_bank": True,
+                        "timeoff_type": t_type,
+                        "title": title or "Option Day",
+                        "old_available": old_avail,
+                        "new_available": new_avail,
+                        "used_amount": round(old_avail - new_avail, 2),
+                        "time_basis": item.get("time_basis") or prev.get("time_basis") or "Days"
+                    })
+
             conn.execute("""
                 INSERT INTO entitlements (timeoff_type, title, available_time, time_basis, next_earn_date, updated_at)
                 VALUES (:timeoff_type, :title, :available_time, :time_basis, :next_earn_date, CURRENT_TIMESTAMP)
@@ -366,6 +424,7 @@ def upsert_entitlements(entitlements_list: List[Dict[str, Any]], profile: Option
                     updated_at = CURRENT_TIMESTAMP
             """, item)
     conn.close()
+    return option_day_usages
 
 
 def get_entitlements() -> Dict[str, Any]:

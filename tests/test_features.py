@@ -129,11 +129,15 @@ class TestNewFeatures(unittest.TestCase):
         }
         self.assertFalse(upsert_shift(unworked_tue))
 
-        # Now a daily timecard is posted for Tuesday 12/15 -> should return True!
-        posted_tue = dict(unworked_tue)
-        posted_tue["pay_code"] = "PAY ACTUAL"
-        posted_tue["start_time_dec"] = 9.25
-        posted_tue["start_time_clock"] = "9:15 AM"
+        # Clock-in-only punch (no end punch / 0 hours) MUST NOT fire a notification yet
+        clock_in_only_tue = dict(unworked_tue)
+        clock_in_only_tue["pay_code"] = "PAY ACTUAL"
+        clock_in_only_tue["start_time_dec"] = 9.25
+        clock_in_only_tue["start_time_clock"] = "9:15 AM"
+        self.assertFalse(upsert_shift(clock_in_only_tue))
+
+        # Now the completed daily timecard is posted for Tuesday 12/15 -> should return True!
+        posted_tue = dict(clock_in_only_tue)
         posted_tue["end_time_dec"] = 19.50
         posted_tue["end_time_clock"] = "7:30 PM"
         posted_tue["meal_unpaid_hours"] = 0.50
@@ -144,6 +148,34 @@ class TestNewFeatures(unittest.TestCase):
         self.assertTrue(upsert_shift(posted_tue))
         # Subsequent sync of the same already-posted day should return False
         self.assertFalse(upsert_shift(posted_tue))
+
+        # Option Day posted on Wednesday 12/16 (without clock punches) -> should return True!
+        unworked_wed = dict(unworked_tue)
+        unworked_wed["date"] = "2026-12-16"
+        unworked_wed["day_name"] = "Wed"
+        self.assertFalse(upsert_shift(unworked_wed))
+
+        option_day_wed = dict(unworked_wed)
+        option_day_wed["pay_code"] = "OPTION DAY"
+        option_day_wed["total_hours"] = 8.00
+        option_day_wed["gross_pay"] = 375.84
+        self.assertTrue(upsert_shift(option_day_wed))
+        self.assertFalse(upsert_shift(option_day_wed))
+
+        # Option Day balance decrease in Time Off bank -> should return Option Day usage alert
+        initial_entitlements = [
+            {"timeoff_type": "OPT", "title": "Option Day", "available_time": 2.0, "time_basis": "Days", "next_earn_date": "Thu 12/31/2026"}
+        ]
+        upsert_entitlements(initial_entitlements)
+        after_use_entitlements = [
+            {"timeoff_type": "OPT", "title": "Option Day", "available_time": 1.0, "time_basis": "Days", "next_earn_date": "Thu 12/31/2026"}
+        ]
+        usages = upsert_entitlements(after_use_entitlements)
+        self.assertEqual(len(usages), 1)
+        self.assertEqual(usages[0]["timeoff_type"], "OPT")
+        self.assertAlmostEqual(usages[0]["old_available"], 2.0)
+        self.assertAlmostEqual(usages[0]["new_available"], 1.0)
+        self.assertAlmostEqual(usages[0]["used_amount"], 1.0)
 
     def test_eight_week_cap_and_archive_split(self):
         from backend.database import upsert_week, get_active_and_archived_weeks
@@ -228,18 +260,26 @@ class TestNewFeatures(unittest.TestCase):
         # Verify shared helper + atomic file storage + closed-app full ingestion + battery efficiency
         self.assertIn("writeTextFileAtomic", helper_src)
         self.assertIn("clearBackgroundSyncPrefs", helper_src)
+        self.assertIn("PREF_LAST_TIMEOFF_FINGERPRINT", helper_src)
         self.assertIn("R.drawable.ic_stat_tvc", helper_src)
         self.assertIn("getPendingJob(JOB_ID)", job_src)
         self.assertIn("FAST_JOB_ID", job_src)
         self.assertIn("shouldSkipForBatteryEfficiency", job_src)
         self.assertIn("isTodayShiftCompletedInStore", job_src)
+        self.assertIn("isOptionDayShift", job_src)
+        self.assertIn("notifyForOptionDayBankChanges", job_src)
+        self.assertIn("isPrimePostShiftWindow", job_src)
         self.assertIn("PREF_LAST_PAGE_FINGERPRINT", job_src)
         self.assertIn("window.TimecardBridge.ingestWeekHtml", job_src)
+        self.assertIn("window.TimecardBridge.ingestTimeoffHtml", job_src)
         self.assertIn("recordBackgroundSyncComplete", job_src)
 
         # Verify disk reload & foreground refresh bridges + adaptive icon manifest
         self.assertIn("reloadFromDiskIfUpdated", bridge_src)
         self.assertIn("getNewTimecardsJson", bridge_src)
+        self.assertIn("getOptionDayAlertsJson", bridge_src)
+        self.assertIn("isOptionDayPayCode", bridge_src)
+        self.assertIn("isOptionDayShift", app_js_src)
         self.assertIn("syncFromNativeDiskIfUpdated", app_js_src)
         self.assertIn("refreshDashboardFromStore", app_js_src)
         self.assertIn('id="batteryOptNotice"', html_src)

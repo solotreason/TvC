@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.5", lifespan=lifespan)
+app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.6", lifespan=lifespan)
 
 
 @app.middleware("http")

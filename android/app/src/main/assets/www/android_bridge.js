@@ -330,6 +330,50 @@
     return { profile, entitlements };
   }
 
+  function isOptionDayPayCode(payCode, details) {
+    const raw = (payCode || '').trim().toUpperCase();
+    if (
+      raw.includes('OPTION') ||
+      raw.includes('OPT DAY') ||
+      raw.includes('OPTDAY') ||
+      raw.includes('OPT WK') ||
+      raw.includes('OPT WEEK') ||
+      raw === 'OPT' ||
+      raw === 'OPW' ||
+      raw.startsWith('OPT ')
+    ) {
+      return true;
+    }
+    if (Array.isArray(details)) {
+      for (const det of details) {
+        const t = `${(det && det.trans_type) || ''} ${(det && det.activity) || ''}`.trim().toUpperCase();
+        if (
+          t.includes('OPTION') ||
+          t.includes('OPT DAY') ||
+          t.includes('OPTDAY') ||
+          t.includes('OPT WK') ||
+          t.includes('OPT WEEK') ||
+          t === 'OPT' ||
+          t === 'OPW'
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function isShiftCompleted(s) {
+    if (!s) return false;
+    return (
+      s.start_time_dec !== null &&
+      s.start_time_dec !== undefined &&
+      s.end_time_dec !== null &&
+      s.end_time_dec !== undefined &&
+      (s.total_hours || 0) > 0.005
+    );
+  }
+
   // Upserts parsed timecard data & runs Punch Modification Auditor (Start Time, End Time, Meal/Unpaid)
   function upsertParsedWeek(parsedData) {
     const db = loadDatabase();
@@ -368,20 +412,20 @@
       const existing = prevShiftMap.get(newShift.date);
       const shiftAudits = existing && Array.isArray(existing.audit_history) ? [...existing.audit_history] : [];
 
-      const wasEmpty = !existing || (
-        (existing.start_time_dec === null || existing.start_time_dec === undefined) &&
-        (existing.total_hours || 0) <= 0.005
+      const wasCompleteOrOpt = isShiftCompleted(existing) || (
+        !!existing && isOptionDayPayCode(existing.pay_code, existing.details)
       );
-      const hasTimecardNow = (
-        (newShift.start_time_dec !== null && newShift.start_time_dec !== undefined) ||
-        (newShift.total_hours || 0) > 0.005
-      );
-      if (weekAlreadyHadShifts && wasEmpty && hasTimecardNow) {
+      const isOptionDayNow = isOptionDayPayCode(newShift.pay_code, newShift.details);
+      const isCompleteOrOptNow = isShiftCompleted(newShift) || isOptionDayNow;
+
+      if (weekAlreadyHadShifts && !wasCompleteOrOpt && isCompleteOrOptNow) {
         if (!Array.isArray(syncState.new_timecards)) syncState.new_timecards = [];
         syncState.new_timecards.push({
           week_end_date: weekDate,
           date: newShift.date,
           day_name: newShift.day_name,
+          pay_code: newShift.pay_code || '',
+          is_option_day: isOptionDayNow,
           start_time_clock: newShift.start_time_clock,
           end_time_clock: newShift.end_time_clock,
           total_hours: newShift.total_hours || 0.0,
@@ -542,10 +586,46 @@
 
   function upsertParsedTimeoff(parsedTimeoff) {
     const db = loadDatabase();
+    if (!db.timeoff) {
+      db.timeoff = { profile: { emp_id: '', emp_name: '' }, entitlements: [] };
+    }
+    const prevEntitlements = Array.isArray(db.timeoff.entitlements) ? db.timeoff.entitlements : [];
+    const prevByType = new Map();
+    prevEntitlements.forEach(item => {
+      if (item && item.timeoff_type) {
+        prevByType.set(String(item.timeoff_type).trim().toUpperCase(), item);
+      }
+    });
+
     if (parsedTimeoff.profile && parsedTimeoff.profile.emp_id) {
       db.timeoff.profile = parsedTimeoff.profile;
     }
     if (parsedTimeoff.entitlements && parsedTimeoff.entitlements.length > 0) {
+      if (prevByType.size > 0) {
+        parsedTimeoff.entitlements.forEach(newItem => {
+          const tType = String((newItem && newItem.timeoff_type) || '').trim().toUpperCase();
+          const title = String((newItem && newItem.title) || '').trim();
+          const isOpt = tType === 'OPT' || tType === 'OPW' || title.toUpperCase().includes('OPTION');
+          const prev = prevByType.get(tType);
+          if (prev && isOpt) {
+            const oldAvail = Number(prev.available_time) || 0.0;
+            const newAvail = Number(newItem.available_time) || 0.0;
+            if (oldAvail > newAvail + 0.005) {
+              if (!Array.isArray(syncState.option_day_alerts)) syncState.option_day_alerts = [];
+              syncState.option_day_alerts.push({
+                is_option_day: true,
+                from_entitlement_bank: true,
+                timeoff_type: tType,
+                title: title || 'Option Day',
+                old_available: oldAvail,
+                new_available: newAvail,
+                used_amount: Number((oldAvail - newAvail).toFixed(2)),
+                time_basis: newItem.time_basis || prev.time_basis || 'Days'
+              });
+            }
+          }
+        });
+      }
       db.timeoff.entitlements = parsedTimeoff.entitlements;
     }
     saveDatabase(db);
@@ -604,6 +684,9 @@
     },
     getNewTimecardsJson: function () {
       return JSON.stringify(syncState.new_timecards || []);
+    },
+    getOptionDayAlertsJson: function () {
+      return JSON.stringify(syncState.option_day_alerts || []);
     },
     recordBackgroundSyncComplete: function (message, statusLabel) {
       const db = loadDatabase();
@@ -893,6 +976,7 @@
       syncState.sync_in_progress = true;
       syncState.percent = 5;
       syncState.new_timecards = [];
+      syncState.option_day_alerts = [];
       syncState.stage = maxWeeks === 1 ? 'Refreshing Current Week' : 'Starting';
       syncState.message = maxWeeks === 1
         ? 'Refreshing current pending week only...'
@@ -923,6 +1007,7 @@
         message: syncState.message,
         requires_login: syncState.requires_login,
         new_timecards: syncState.new_timecards || [],
+        option_day_alerts: syncState.option_day_alerts || [],
         latest_log: syncState.latest_log || db.latest_log
       });
     }

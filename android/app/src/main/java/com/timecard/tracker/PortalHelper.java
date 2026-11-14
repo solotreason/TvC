@@ -50,6 +50,8 @@ final class PortalHelper {
     static final String PREFS_NAME = "tvc_prefs";
     static final String PREF_LAST_BG_SYNC_MS = "last_bg_sync_ms";
     static final String PREF_LAST_PAGE_FINGERPRINT = "last_page_fingerprint_v1";
+    static final String PREF_LAST_TIMEOFF_SYNC_MS = "last_timeoff_bg_sync_ms";
+    static final String PREF_LAST_TIMEOFF_FINGERPRINT = "last_timeoff_fingerprint_v1";
 
     static final String EXTRA_WEEK_END_DATE = "EXTRA_WEEK_END_DATE";
     static final String EXTRA_SHIFT_DATE = "EXTRA_SHIFT_DATE";
@@ -513,6 +515,8 @@ final class PortalHelper {
                     .edit()
                     .remove(PREF_LAST_BG_SYNC_MS)
                     .remove(PREF_LAST_PAGE_FINGERPRINT)
+                    .remove(PREF_LAST_TIMEOFF_SYNC_MS)
+                    .remove(PREF_LAST_TIMEOFF_FINGERPRINT)
                     .apply();
         } catch (Exception ignored) {}
     }

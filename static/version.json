@@ -1,6 +1,6 @@
 {
   "version": "2.4.6",
-  "build": 2026111304,
+  "build": 2026111401,
   "min_apk_version": 1,
   "release_notes": "Precision notifications for completed timecards, supervisor punch edits & Option Day usage (daily card + Time Off bank) with smart shift-aware background polling",
   "github_repo": "solotreason/TvC",

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Adaptive Icon Foreground (Safe Zone: 24..84) -->
+
+    <!-- Outer Slate Dial Ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#334155"
+        android:strokeWidth="3.2"
+        android:pathData="M54,25 A23,23 0 1,1 53.9,25 Z" />
+
+    <!-- Active Amber Shift Arc (#F59E0B) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#F59E0B"
+        android:strokeWidth="4.0"
+        android:strokeLineCap="round"
+        android:pathData="M31,48 A23,23 0 0,1 71,32" />
+
+    <!-- Clock Hands (9:00 punch start) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#F8FAFC"
+        android:strokeWidth="3.0"
+        android:strokeLineCap="round"
+        android:pathData="M54,48 L54,32" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#F59E0B"
+        android:strokeWidth="3.0"
+        android:strokeLineCap="round"
+        android:pathData="M54,48 L40,48" />
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M54,48 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0" />
+
+    <!-- Stylized 'TvC' Monogram -->
+    <!-- 'T' -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FBBF24"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:pathData="M33,68 L45,68 M39,68 L39,81" />
+    <!-- 'v' -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.0"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M49,71 L54,81 L59,71" />
+    <!-- 'C' -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FBBF24"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:pathData="M74,70 C69,66 63,71 63,75.5 C63,80 69,84 74,80" />
+</vector>

@@ -8,8 +8,8 @@ let pollStatusInterval = null;
 let isSilentSync = false;
 let lastSmartCheckAt = 0;
 let smartCheckTimer = null;
-const SMART_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
-const SMART_RESUME_MIN_GAP_MS = 15 * 60 * 1000; // 15 minutes on app resume
+const SMART_CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const SMART_RESUME_MIN_GAP_MS = 5 * 60 * 1000; // 5 minutes on app resume
 const expandedRows = new Set(); // Stores dates of expanded activeRows (starts empty so no day is forced open)
 
 function getLocalIsoDate(offsetDays = 0) {

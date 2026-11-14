@@ -2,7 +2,24 @@
 
 ## Status & Phases
 
-### Current Sprint: Battery-Smart Closed-App Background Sync (v2.4.4)
+### Current Sprint: 10-Min Fast Background Check, Adaptive Launcher Icon & Transparent Notification Logo (v2.4.5)
+
+- [x] 1. **10-Minute Deadline-Bounded Background Sync + 15-Minute Periodic Safety Net (`TimecardSyncJobService.java` + `static/app.js`)**:
+  - Switched `PERIODIC_INTERVAL_MS` to 15m (`5m` flex) as a persisted safety net and added `FAST_JOB_ID = 2027` (`10m` minimum latency, `12m` override deadline) that self-chains while waiting for today's shift so checks never drift to 45 minutes.
+  - Lowered `ACTIVE_MIN_GAP_MS` to 8 minutes and foreground `SMART_CHECK_INTERVAL_MS` to 10 minutes (`5m` on resume), while keeping the 3-hour post-completion slowdown and SHA-256 unchanged-DOM short-circuit.
+
+- [x] 2. **Fix Solid-White Android Notification Bar Icon (`ic_stat_tvc.xml` + `PortalHelper.java`)**:
+  - Created `res/drawable/ic_stat_tvc.xml` (`24dp` monochrome silhouette with 100% transparent background and crisp white clock/TvC paths).
+  - Updated `PortalHelper.postShiftNotification` to use `R.drawable.ic_stat_tvc` and brand accent color `#F59E0B`.
+
+- [x] 3. **Remove White Background from TvC App & Web Logos (`mipmap-anydpi-v26`, `ic_launcher`, `favicon`, `icon-192.png`, `icon-512.png`)**:
+  - Added Android 8+ `<adaptive-icon>` (`ic_launcher_background.xml`, `ic_launcher_foreground.xml`, `mipmap-anydpi-v26/ic_launcher.xml`, `ic_launcher_round.xml`) and wired into `AndroidManifest.xml` so Android never wraps the launcher icon in a white plate.
+  - Regenerated `static/favicon.png`, `static/icon-192.png`, `static/icon-512.png`, `static/favicon.svg`, and `static/logo.svg` with transparent RGBA backgrounds and crisp `TvC` typography.
+
+- [x] 4. **Verify, Package OTA, Build APK & Push (v2.4.5)**:
+  - Ran unit tests, `--pack-ota`, `--build-apk`, and pushed to `origin/main`.
+
+### Completed Sprint: Battery-Smart Closed-App Background Sync (v2.4.4)
 
 - [x] 1. **Zero-WebView Adaptive Battery Gate (`TimecardSyncJobService.java`)**:
   - Updated periodic `JobScheduler` interval to 30m (10m flex) and verified existing interval before rescheduling.

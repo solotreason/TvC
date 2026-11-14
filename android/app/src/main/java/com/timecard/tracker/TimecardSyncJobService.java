@@ -47,11 +47,14 @@ import java.util.Set;
 public class TimecardSyncJobService extends JobService {
 
     public static final int JOB_ID = 2026;
+    public static final int FAST_JOB_ID = 2027;
 
     private static final String PREF_NOTIFIED_SIGNATURES = "notified_shift_signatures_v2";
-    private static final long PERIODIC_INTERVAL_MS = 30 * 60 * 1000L;
-    private static final long PERIODIC_FLEX_MS = 10 * 60 * 1000L;
-    private static final long ACTIVE_MIN_GAP_MS = 15 * 60 * 1000L;
+    private static final long PERIODIC_INTERVAL_MS = 15 * 60 * 1000L;
+    private static final long PERIODIC_FLEX_MS = 5 * 60 * 1000L;
+    private static final long FAST_CHECK_DELAY_MS = 10 * 60 * 1000L;
+    private static final long FAST_CHECK_DEADLINE_MS = 12 * 60 * 1000L;
+    private static final long ACTIVE_MIN_GAP_MS = 8 * 60 * 1000L;
     private static final long POST_COMPLETE_MIN_GAP_MS = 3L * 60 * 60 * 1000L;
     private static final long POWER_SAVE_MIN_GAP_MS = 2L * 60 * 60 * 1000L;
     private static final int LOW_BATTERY_SKIP_PCT = 15;
@@ -80,24 +83,49 @@ public class TimecardSyncJobService extends JobService {
         }
     }
 
-    /** Schedules periodic closed-app checks without resetting an existing matching schedule. */
+    /** Schedules periodic closed-app checks (15m safety net) + 10m deadline-bounded fast check when waiting. */
     public static void schedule(Context context) {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler == null) return;
 
+        ComponentName serviceComponent = new ComponentName(context, TimecardSyncJobService.class);
+
         JobInfo pending = scheduler.getPendingJob(JOB_ID);
-        if (pending != null && pending.isPeriodic() && pending.getIntervalMillis() == PERIODIC_INTERVAL_MS) {
-            return;
+        if (pending == null || !pending.isPeriodic() || pending.getIntervalMillis() != PERIODIC_INTERVAL_MS) {
+            JobInfo jobInfo = new JobInfo.Builder(JOB_ID, serviceComponent)
+                    .setPeriodic(PERIODIC_INTERVAL_MS, PERIODIC_FLEX_MS)
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setPersisted(true)
+                    .build();
+            scheduler.schedule(jobInfo);
         }
 
-        ComponentName serviceComponent = new ComponentName(context, TimecardSyncJobService.class);
-        JobInfo jobInfo = new JobInfo.Builder(JOB_ID, serviceComponent)
-                .setPeriodic(PERIODIC_INTERVAL_MS, PERIODIC_FLEX_MS)
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPersisted(true)
-                .build();
+        scheduleNextFastCheckIfWaiting(context, scheduler, serviceComponent);
+    }
 
-        scheduler.schedule(jobInfo);
+    private static void scheduleNextFastCheckIfWaiting(
+            Context context,
+            JobScheduler scheduler,
+            ComponentName serviceComponent
+    ) {
+        try {
+            if (!PortalHelper.checkCookiesLoggedIn(context)) return;
+            String storeJson = PortalHelper.readFileString(context, PortalHelper.STORE_FILENAME);
+            if (isTodayShiftCompletedInStore(storeJson)) {
+                scheduler.cancel(FAST_JOB_ID);
+                return;
+            }
+            if (scheduler.getPendingJob(FAST_JOB_ID) != null) {
+                return;
+            }
+            JobInfo fastJob = new JobInfo.Builder(FAST_JOB_ID, serviceComponent)
+                    .setMinimumLatency(FAST_CHECK_DELAY_MS)
+                    .setOverrideDeadline(FAST_CHECK_DEADLINE_MS)
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setPersisted(true)
+                    .build();
+            scheduler.schedule(fastJob);
+        } catch (Exception ignored) {}
     }
 
     /** Cancels scheduled closed-app background checks. */
@@ -105,6 +133,7 @@ public class TimecardSyncJobService extends JobService {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler != null) {
             scheduler.cancel(JOB_ID);
+            scheduler.cancel(FAST_JOB_ID);
         }
     }
 
@@ -116,6 +145,7 @@ public class TimecardSyncJobService extends JobService {
 
         String storeSnapshot = PortalHelper.readFileString(this, PortalHelper.STORE_FILENAME);
         if (shouldSkipForBatteryEfficiency(storeSnapshot)) {
+            schedule(this);
             return false;
         }
 
@@ -816,6 +846,7 @@ public class TimecardSyncJobService extends JobService {
             try {
                 jobFinished(params, reschedule);
             } catch (Exception ignored) {}
+            schedule(TimecardSyncJobService.this);
         });
     }
 

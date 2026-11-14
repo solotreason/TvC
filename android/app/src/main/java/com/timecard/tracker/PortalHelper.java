@@ -371,7 +371,8 @@ final class PortalHelper {
                     ? new Notification.Builder(context, NOTIFICATION_CHANNEL_ID)
                     : new Notification.Builder(context);
 
-            builder.setSmallIcon(R.drawable.ic_launcher)
+            builder.setSmallIcon(R.drawable.ic_stat_tvc)
+                    .setColor(0xFFF59E0B)
                     .setContentTitle(title != null ? title : "New Timecard Added")
                     .setContentText(body != null ? body : "A new daily timecard has been posted.")
                     .setStyle(new Notification.BigTextStyle().bigText(body))

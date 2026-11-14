@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Transparent canvas required by Android status bar monochrome renderer -->
+
+    <!-- Outer Clock Dial Arc (Top + Left + Right, leaving room at bottom for TvC badge) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:pathData="M4.2,13.5 A8.5,8.5 0 1,1 19.8,13.5" />
+
+    <!-- Top Timecard Header Notch -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M9,1.2 L15,1.2 C15.6,1.2 16,1.6 16,2.2 C16,2.8 15.6,3.2 15,3.2 L9,3.2 C8.4,3.2 8,2.8 8,2.2 C8,1.6 8.4,1.2 9,1.2 Z" />
+
+    <!-- Clock Hands (9:00 punch position) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M12,5.8 L12,10.5 L8.2,10.5" />
+
+    <!-- Center Pivot Dot -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,10.5 m-1.4,0 a1.4,1.4 0 1,0 2.8,0 a1.4,1.4 0 1,0 -2.8,0" />
+
+    <!-- Bottom 'T v C' Monogram Silhouette (Crisp cutouts on transparent background) -->
+    <!-- 'T' -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.9"
+        android:strokeLineCap="round"
+        android:pathData="M3.2,16.2 L7.8,16.2 M5.5,16.2 L5.5,21.8" />
+
+    <!-- 'v' -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M9.7,17.2 L11.8,21.8 L13.9,17.2" />
+
+    <!-- 'C' -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.9"
+        android:strokeLineCap="round"
+        android:pathData="M20.5,17.0 C19.5,16.0 17.8,16.0 16.8,17.1 C15.8,18.2 15.8,19.9 16.8,21.0 C17.8,22.0 19.5,22.0 20.5,21.0" />
+</vector>

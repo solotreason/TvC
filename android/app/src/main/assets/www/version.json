@@ -1,6 +1,6 @@
 {
   "version": "2.4.5",
-  "build": 2026111302,
+  "build": 2026111303,
   "min_apk_version": 1,
   "release_notes": "10-minute deadline-bounded background check, adaptive launcher icon without white background, and transparent notification bar icon",
   "github_repo": "solotreason/TvC",

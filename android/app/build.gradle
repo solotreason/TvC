@@ -9,7 +9,7 @@ android {
         applicationId "com.timecard.tracker"
         minSdk 26
         targetSdk 34
-        versionCode 2026111408
+        versionCode 2026111409
         versionName "2.4.8"
     }
 

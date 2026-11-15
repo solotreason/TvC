@@ -1,10 +1,10 @@
 {
   "version": "2.4.8",
-  "build": 2026111408,
+  "build": 2026111409,
   "min_apk_version": 1,
   "release_notes": "Android Material pull-down refresh, clean Sign-In header & footer, and conditional APK update button",
   "github_repo": "solotreason/TvC",
   "ota_bundle_url": "https://raw.githubusercontent.com/solotreason/TvC/main/static/ota_bundle.zip",
   "apk_url": "https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk",
-  "apk_build": 2026111408
+  "apk_build": 2026111409
 }

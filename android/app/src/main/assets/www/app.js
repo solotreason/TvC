@@ -1030,6 +1030,7 @@ function updateAuthGateUI(hasSyncedWeeks = false) {
   const loginRequiredView = document.getElementById('loginRequiredView');
   const dashboardContent = document.getElementById('dashboardContent');
   const weekSelectContainer = document.getElementById('weekSelectContainer');
+  const authBtn = document.getElementById('authBtn');
   const showDashboard = isUserLoggedIn || hasSyncedWeeks || !!currentWeekData;
 
   if (loginRequiredView) {
@@ -1041,6 +1042,10 @@ function updateAuthGateUI(hasSyncedWeeks = false) {
   if (weekSelectContainer) {
     weekSelectContainer.classList.toggle('hidden', !showDashboard);
     weekSelectContainer.classList.toggle('flex', showDashboard);
+  }
+  if (authBtn) {
+    authBtn.classList.toggle('hidden', !showDashboard);
+    authBtn.classList.toggle('flex', showDashboard);
   }
   refreshBatteryOptimizationNotice();
 }
@@ -1056,7 +1061,7 @@ async function checkAuthStatus() {
     const res = await fetch('/api/auth/status');
     const data = await res.json();
     isUserLoggedIn = !!data.logged_in;
-    updateAuthGateUI();
+    const showDashboard = isUserLoggedIn || !!currentWeekData;
 
     if (isUserLoggedIn) {
       if (authDot) authDot.className = 'w-2 h-2 rounded-full bg-[#dc3545]';
@@ -1073,7 +1078,7 @@ async function checkAuthStatus() {
       if (authDot) authDot.className = 'w-2 h-2 rounded-full bg-[#198754] animate-pulse';
       if (authLabel) authLabel.textContent = 'Log In';
       if (authBtn) {
-        authBtn.className = 'px-2.5 py-1.5 text-xs font-bold rounded border border-[#ffeeba] bg-[#fff3cd] text-[#856404] hover:bg-[#ffe8a1] flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer whitespace-nowrap';
+        authBtn.className = (showDashboard ? 'flex ' : 'hidden ') + 'px-2.5 py-1.5 text-xs font-bold rounded border border-[#ffeeba] bg-[#fff3cd] text-[#856404] hover:bg-[#ffe8a1] items-center gap-1.5 shadow-sm transition-colors cursor-pointer whitespace-nowrap';
         authBtn.title = 'Not authenticated. Click to log in.';
       }
       if (syncBtn) {
@@ -1081,6 +1086,7 @@ async function checkAuthStatus() {
         syncBtn.classList.remove('flex');
       }
     }
+    updateAuthGateUI();
   } catch (err) {
     console.error('Failed to check auth status:', err);
     if (authLabel) authLabel.textContent = 'Log In';
@@ -1088,6 +1094,7 @@ async function checkAuthStatus() {
       syncBtn.classList.add('hidden');
       syncBtn.classList.remove('flex');
     }
+    updateAuthGateUI();
   }
 }
 
@@ -1366,9 +1373,10 @@ function setupTabs() {
   });
 }
 
-// Pull-Down-to-Refresh handler (Refreshes ONLY the Current Pending Week)
+// Android SwipeRefreshLayout-Style Pull-Down-to-Refresh handler (Refreshes ONLY the Current Pending Week)
 function setupPullToRefresh() {
   const container = document.getElementById('pullRefreshContainer');
+  const disc = document.getElementById('pullRefreshDisc');
   const icon = document.getElementById('pullRefreshIcon');
   const text = document.getElementById('pullRefreshText');
   if (!container || !icon || !text) return;
@@ -1377,7 +1385,8 @@ function setupPullToRefresh() {
   let currentPull = 0;
   let isRefreshingPull = false;
   let isMouseDown = false;
-  const PULL_THRESHOLD = 42;
+  const PULL_THRESHOLD = 46;
+  const MAX_PULL = 82;
 
   function getScrollTop() {
     return Math.max(
@@ -1387,30 +1396,66 @@ function setupPullToRefresh() {
     );
   }
 
+  function renderPullState(pullPx, spinning = false) {
+    if (spinning) {
+      container.style.transition = 'transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 150ms ease';
+      container.style.transform = 'translateY(12px)';
+      container.style.opacity = '1';
+      if (disc) disc.style.transform = 'scale(1)';
+      icon.className = 'fa-solid fa-circle-notch fa-spin text-[#f59e0b] text-base';
+      icon.style.transform = 'rotate(0deg)';
+      text.textContent = 'Refreshing current week...';
+      return;
+    }
+
+    if (pullPx <= 0) {
+      container.style.transition = 'transform 180ms ease-out, opacity 150ms ease-out';
+      container.style.transform = 'translateY(-64px)';
+      container.style.opacity = '0';
+      if (disc) disc.style.transform = 'scale(0.6)';
+      icon.className = 'fa-solid fa-rotate-right text-[#f59e0b] text-base';
+      icon.style.transform = 'rotate(0deg)';
+      text.textContent = 'Pull to refresh current week';
+      return;
+    }
+
+    const progress = Math.min(1, pullPx / PULL_THRESHOLD);
+    const translateY = Math.round(-52 + (pullPx * 0.85));
+    const scale = (0.65 + (0.35 * progress)).toFixed(2);
+    const deg = Math.round(pullPx * 4.2);
+
+    container.style.transition = 'none';
+    container.style.transform = `translateY(${translateY}px)`;
+    container.style.opacity = String(Math.min(1, progress * 1.25));
+    if (disc) {
+      disc.style.transform = `scale(${scale})`;
+      disc.className = progress >= 1
+        ? 'w-10 h-10 rounded-full bg-[#1e293b] border-2 border-[#f59e0b] shadow-lg flex items-center justify-center text-[#f59e0b]'
+        : 'w-10 h-10 rounded-full bg-white border border-[#dee2e6] shadow-lg flex items-center justify-center text-[#f59e0b]';
+    }
+    icon.className = 'fa-solid fa-rotate-right text-base';
+    icon.style.transform = `rotate(${deg}deg)`;
+    text.textContent = progress >= 1 ? 'Release to refresh week' : 'Pull to refresh current week';
+  }
+
   function collapsePullBar() {
     isRefreshingPull = false;
     startY = null;
     currentPull = 0;
-    container.style.height = '0px';
-    container.classList.remove('border-[#ffeeba]');
-    icon.className = 'fa-solid fa-arrow-down text-[#f59e0b] transition-transform duration-200';
-    icon.style.transform = 'rotate(0deg)';
-    text.textContent = 'Pull down to refresh current week only';
+    renderPullState(0, false);
   }
 
   window.__collapsePullRefreshBar = collapsePullBar;
 
+  function canStartPull(targetEl) {
+    if (isRefreshingPull) return false;
+    if (!isUserLoggedIn && !currentWeekData) return false;
+    if (targetEl && targetEl.closest && targetEl.closest('select, button, input, a, #otaModal')) return false;
+    return getScrollTop() <= 4;
+  }
+
   function onStart(clientY, targetEl) {
-    if (isRefreshingPull) return;
-    if (!isUserLoggedIn && !currentWeekData) {
-      startY = null;
-      return;
-    }
-    if (targetEl && targetEl.closest && targetEl.closest('select, button, input, a')) {
-      startY = null;
-      return;
-    }
-    if (getScrollTop() > 15) {
+    if (!canStartPull(targetEl)) {
       startY = null;
       return;
     }
@@ -1418,44 +1463,45 @@ function setupPullToRefresh() {
     currentPull = 0;
   }
 
-  function onMove(clientY, rawEvent) {
-    if (startY === null || isRefreshingPull) return;
-    if (getScrollTop() > 15) {
-      resetPull();
+  function onMove(clientY, rawEvent, targetEl) {
+    if (isRefreshingPull) return;
+    if (getScrollTop() > 4) {
+      if (currentPull > 0) resetPull();
+      startY = null;
       return;
     }
+    // Dynamic top-scroll latching: if user scrolled up to top in the same drag, latch startY now
+    if (startY === null) {
+      if (canStartPull(targetEl)) {
+        startY = clientY;
+        currentPull = 0;
+      }
+      return;
+    }
+
     const delta = clientY - startY;
     if (delta <= 0) {
-      container.style.height = '0px';
+      if (currentPull > 0) renderPullState(0, false);
       currentPull = 0;
       return;
     }
 
-    // Prevent browser/WebView native overscroll from firing touchcancel
-    if (delta > 6 && rawEvent && rawEvent.cancelable) {
+    // CRITICAL for Android WebView: preventDefault on the very first downward frame at scrollTop=0
+    // so Chromium does not hand the touch stream to native overscroll/touchcancel.
+    if (rawEvent && rawEvent.cancelable) {
       rawEvent.preventDefault();
     }
 
-    currentPull = Math.min(72, delta * 0.55);
-    container.style.height = `${currentPull}px`;
-    container.classList.add('border-[#ffeeba]');
-
-    if (currentPull >= PULL_THRESHOLD) {
-      icon.style.transform = 'rotate(180deg)';
-      text.textContent = 'Release to refresh current week only';
-    } else {
-      icon.style.transform = 'rotate(0deg)';
-      text.textContent = 'Pull down to refresh current week only';
-    }
+    // Smooth logarithmic resistance curve like Android SwipeRefreshLayout
+    currentPull = Math.min(MAX_PULL, Math.pow(delta, 0.85) * 1.15);
+    renderPullState(currentPull, false);
   }
 
   function resetPull() {
     if (isRefreshingPull) return;
     startY = null;
     currentPull = 0;
-    container.style.height = '0px';
-    container.classList.remove('border-[#ffeeba]');
-    icon.style.transform = 'rotate(0deg)';
+    renderPullState(0, false);
   }
 
   function onEnd() {
@@ -1465,11 +1511,7 @@ function setupPullToRefresh() {
     if (triggered) {
       isRefreshingPull = true;
       currentPull = 0;
-      container.style.height = '44px';
-      container.classList.add('border-[#ffeeba]');
-      icon.style.transform = 'rotate(0deg)';
-      icon.className = 'fa-solid fa-arrows-rotate fa-spin text-[#d97706]';
-      text.textContent = 'Refreshing current week...';
+      renderPullState(PULL_THRESHOLD, true);
       // Refresh ONLY the current week (max_weeks = 1, sync_timeoff = false)
       triggerSync(true, 1, false);
     } else {
@@ -1485,14 +1527,13 @@ function setupPullToRefresh() {
   }, { passive: true });
 
   window.addEventListener('touchmove', (e) => {
-    if (startY !== null && e.touches && e.touches.length === 1) {
-      onMove(e.touches[0].clientY, e);
+    if (e.touches && e.touches.length === 1) {
+      onMove(e.touches[0].clientY, e, e.target);
     }
   }, { passive: false });
 
   window.addEventListener('touchend', onEnd);
   window.addEventListener('touchcancel', () => {
-    // If the user already pulled past threshold before Android WebView fired touchcancel, still trigger
     if (currentPull >= PULL_THRESHOLD) {
       onEnd();
     } else {
@@ -1508,8 +1549,8 @@ function setupPullToRefresh() {
   });
 
   window.addEventListener('mousemove', (e) => {
-    if (!isMouseDown || startY === null) return;
-    onMove(e.clientY, null);
+    if (!isMouseDown) return;
+    onMove(e.clientY, null, e.target);
   });
 
   window.addEventListener('mouseup', () => {
@@ -1811,8 +1852,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (info.apk_update_available && typeof window.AndroidNative !== 'undefined') {
           window.showApkUpdateBanner(info);
-        } else if (otaModalInstallApkBtn && typeof window.AndroidNative !== 'undefined') {
-          otaModalInstallApkBtn.classList.remove('hidden');
+        } else {
+          if (otaModalInstallApkBtn) otaModalInstallApkBtn.classList.add('hidden');
+          const apkBanner = document.getElementById('apkUpdateBanner');
+          if (apkBanner) apkBanner.classList.add('hidden');
         }
       }
     } catch (e) {}

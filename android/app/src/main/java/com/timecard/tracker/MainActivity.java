@@ -71,8 +71,8 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026111407L;
-    private static final String APP_BASE_VERSION = "2.4.7";
+    private static final long APP_BASE_BUILD = 2026111408L;
+    private static final String APP_BASE_VERSION = "2.4.8";
 
     private WebView dashboardWebView;
     private WebView scraperWebView;
@@ -146,6 +146,7 @@ public class MainActivity extends Activity {
         // 1. Primary Dashboard WebView
         dashboardWebView = new WebView(this);
         setupWebViewDefaults(dashboardWebView);
+        dashboardWebView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         dashboardWebView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
         dashboardWebView.addJavascriptInterface(new AndroidNativeBridge(), "AndroidNative");
         dashboardWebView.setWebChromeClient(new WebChromeClient());
@@ -350,7 +351,7 @@ public class MainActivity extends Activity {
                     JSONObject info = new JSONObject(new String(b, StandardCharsets.UTF_8));
                     info.put("apk_build", APP_BASE_BUILD);
                     info.put("apk_version", APP_BASE_VERSION);
-                    long remoteApkBuild = info.optLong("remote_apk_build", info.optLong("build", APP_BASE_BUILD));
+                    long remoteApkBuild = info.optLong("remote_apk_build", 0L);
                     info.put("apk_update_available", remoteApkBuild > APP_BASE_BUILD);
                     if (!info.has("apk_url")) {
                         info.put("apk_url", defaultApkUrl);
@@ -524,7 +525,7 @@ public class MainActivity extends Activity {
                 JSONObject remote = new JSONObject(jsonStr);
                 String remoteVersion = remote.optString("version", APP_BASE_VERSION);
                 long remoteBuild = remote.optLong("build", 0L);
-                long remoteApkBuild = remote.optLong("apk_build", remoteBuild);
+                long remoteApkBuild = remote.optLong("apk_build", 0L);
                 String releaseNotes = remote.optString("release_notes", "Performance improvements.");
                 String bundleUrl = remote.optString("ota_bundle_url", "https://raw.githubusercontent.com/" + repo + "/main/static/ota_bundle.zip");
                 String apkUrl = remote.optString("apk_url", "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk");

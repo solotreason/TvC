@@ -2,7 +2,23 @@
 
 ## Status & Phases
 
-### Current Sprint: Seamless OTA Auto-Apply + 1-Tap In-App Native APK Self-Updater (v2.4.7)
+### Current Sprint: UI Polish, Android Pull-Down Refresh & Conditional APK Update Button (v2.4.8)
+
+- [x] 1. **Remove 'Permanent Vault Active' from Footer (Keep Feature Active) (`static/index.html`)**:
+  - Removed the `Permanent Vault Active` badge and extra separator from the footer while keeping the permanent vault feature and Archive tab intact.
+
+- [x] 2. **Upgrade Android Pull-Down System (`static/index.html`, `static/app.js`, `MainActivity.java`)**:
+  - Replaced the expanding banner bar with an authentic Android Material `SwipeRefreshLayout`-style floating circular spinner disc (`#pullRefreshDisc`) + pill label that drops down from the top header with smooth rotation, scale, and spring release physics.
+  - Fixed Android Chromium WebView first-frame `touchmove` interception (`delta > 0` when `getScrollTop() <= 4` calls `rawEvent.preventDefault()` immediately before WebView steals the touch gesture) and added dynamic top-scroll latching (`startY = clientY` when scrolling back to `scrollTop === 0` mid-drag) plus `OVER_SCROLL_NEVER` on `dashboardWebView`.
+
+- [x] 3. **Hide Top-Left Header 'Log In' Button When 'Sign In Required' Gate is Shown (`static/index.html`, `static/app.js`)**:
+  - Hid `#authBtn` whenever `#loginRequiredView` ("Sign In Required") is displayed (`!showDashboard`), and only showed `#authBtn` once the dashboard is visible (`showDashboard`).
+
+- [x] 4. **Show 'Install Native App Update (.APK)' Strictly When Available/Necessary (`static/app.js`, `static/android_bridge.js`, `MainActivity.java`)**:
+  - Removed the fallback that unhid `#otaModalInstallApkBtn` when `info.apk_update_available` was `false`; explicitly hid both `#otaModalInstallApkBtn` and `#apkUpdateBanner` whenever `apk_update_available` is `false`.
+  - Verified with unit tests (20/20 passed), built `v2.4.8` OTA + APK, pushed to `origin/main`, and purged jsDelivr CDN cache.
+
+### Completed Sprint: Seamless OTA Auto-Apply + 1-Tap In-App Native APK Self-Updater (v2.4.7)
 
 - [x] 1. **Native In-App APK Self-Updater (`AndroidManifest.xml`, `ApkFileProvider.java`, `MainActivity.java`)**:
   - Added `android.permission.REQUEST_INSTALL_PACKAGES` and registered a zero-dependency `ApkFileProvider` (`android.content.ContentProvider`) in `AndroidManifest.xml` to serve downloaded `.apk` files via `content://com.timecard.tracker.apkprovider/...` with `FLAG_GRANT_READ_URI_PERMISSION`.

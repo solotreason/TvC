@@ -774,12 +774,11 @@
           info.apk_url = info.apk_url || `https://raw.githubusercontent.com/${repo}/main/Timecard-Tracker.apk`;
           if (nativeApkBuild > 0) {
             info.apk_build = nativeApkBuild;
-            const targetBuild = Number(info.remote_apk_build || info.build || 0);
-            info.apk_update_available = Boolean(info.apk_update_available || (targetBuild > nativeApkBuild));
+            const targetApkBuild = Number(info.remote_apk_build || 0);
+            info.apk_update_available = Boolean(targetApkBuild > nativeApkBuild);
           } else {
-            // Older factory APK (pre-v2.4.7) running newer OTA web bundle
-            info.apk_build = 'Pre-2.4.7';
-            info.apk_update_available = true;
+            info.apk_build = info.build || 'Installed';
+            info.apk_update_available = Boolean(info.apk_update_available);
           }
           return makeJsonResponse(info);
         } catch (e) {}

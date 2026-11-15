@@ -1,5 +1,5 @@
 # TvC - Timecard Viewer 🕒📋🌴
-**Version 2.4.8 (Build 2026111409)**
+**Version 2.4.8 (Build 2026111410)**
 
 A fast, private, personal web dashboard and standalone Android application for tracking and auditing timecards, punch modifications, audit histories, and leave entitlements. Built with Python, FastAPI, SQLite, MongoDB Atlas cloud vault, Tailwind CSS, and Playwright for automated background sync.
 
@@ -62,7 +62,7 @@ Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 ### 2. Log In & Sync
 - **Single Auth Toggle**: Click **"Log In"** in the header to authenticate once; once signed in, the button switches to **"Log Out"**.
 - **Sync All Weeks**: Initial login automatically syncs your full multi-week history and leave bank.
-- **Pull-Down Refresh**: Pull down from the top of the page (or click **"Sync"**) to quickly update only the current pending week.
+- **Current Week Sync**: Click **"Sync"** in the header to quickly refresh only the current pending week.
 
 ### 3. Standalone Android App, Auto-OTA & 1-Tap Native APK Updates 📱
 - **100% Standalone On-Phone Operation**: Runs natively without a background server (`com.timecard.tracker`).

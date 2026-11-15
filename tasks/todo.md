@@ -7,9 +7,8 @@
 - [x] 1. **Remove 'Permanent Vault Active' from Footer (Keep Feature Active) (`static/index.html`)**:
   - Removed the `Permanent Vault Active` badge and extra separator from the footer while keeping the permanent vault feature and Archive tab intact.
 
-- [x] 2. **Upgrade Android Pull-Down System (`static/index.html`, `static/app.js`, `MainActivity.java`)**:
-  - Replaced the expanding banner bar with an authentic Android Material `SwipeRefreshLayout`-style floating circular spinner disc (`#pullRefreshDisc`) + pill label that drops down from the top header with smooth rotation, scale, and spring release physics.
-  - Fixed Android Chromium WebView first-frame `touchmove` interception (`delta > 0` when `getScrollTop() <= 4` calls `rawEvent.preventDefault()` immediately before WebView steals the touch gesture) and added dynamic top-scroll latching (`startY = clientY` when scrolling back to `scrollTop === 0` mid-drag) plus `OVER_SCROLL_NEVER` on `dashboardWebView`.
+- [x] 2. **Remove Pull-Down to Refresh (Use Header Sync Button Only) (`static/index.html`, `static/app.js`, `README.md`)**:
+  - Removed `#pullRefreshContainer` from `static/index.html` and `setupPullToRefresh()` from `static/app.js` so refreshing the current week uses the header **Sync** button exclusively.
 
 - [x] 3. **Hide Top-Left Header 'Log In' Button When 'Sign In Required' Gate is Shown (`static/index.html`, `static/app.js`)**:
   - Hid `#authBtn` whenever `#loginRequiredView` ("Sign In Required") is displayed (`!showDashboard`), and only showed `#authBtn` once the dashboard is visible (`showDashboard`).

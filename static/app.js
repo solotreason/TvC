@@ -1209,7 +1209,7 @@ async function triggerSync(headless = true, maxWeeks = 0, syncTimeoff = true, si
         : 'Syncing all 8+ weeks and Time Off Bank in background...');
     syncDetails.textContent = !headless
       ? 'Awaiting 2FA completion...'
-      : (isCurrentWeekOnly ? 'Fast 1-week pull-to-refresh' : 'Full multi-week sync');
+      : (isCurrentWeekOnly ? 'Fast 1-week sync' : 'Full multi-week sync');
   }
 
   try {
@@ -1320,9 +1320,6 @@ async function checkSyncStatus() {
       if (!wasSilent) {
         expandedRows.clear(); // Ensure all day accordions start collapsed after manual sync
       }
-      if (typeof window.__collapsePullRefreshBar === 'function') {
-        window.__collapsePullRefreshBar();
-      }
       await checkAuthStatus();
       await Promise.all([
         loadWeeks(currentWeekData ? currentWeekData.week_end_date : null),
@@ -1373,197 +1370,9 @@ function setupTabs() {
   });
 }
 
-// Android SwipeRefreshLayout-Style Pull-Down-to-Refresh handler (Refreshes ONLY the Current Pending Week)
-function setupPullToRefresh() {
-  const container = document.getElementById('pullRefreshContainer');
-  const disc = document.getElementById('pullRefreshDisc');
-  const icon = document.getElementById('pullRefreshIcon');
-  const text = document.getElementById('pullRefreshText');
-  if (!container || !icon || !text) return;
-
-  let startY = null;
-  let currentPull = 0;
-  let isRefreshingPull = false;
-  let isMouseDown = false;
-  const PULL_THRESHOLD = 46;
-  const MAX_PULL = 82;
-
-  function getScrollTop() {
-    return Math.max(
-      window.scrollY || 0,
-      document.documentElement ? document.documentElement.scrollTop || 0 : 0,
-      document.body ? document.body.scrollTop || 0 : 0
-    );
-  }
-
-  function renderPullState(pullPx, spinning = false) {
-    if (spinning) {
-      container.style.transition = 'transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 150ms ease';
-      container.style.transform = 'translateY(12px)';
-      container.style.opacity = '1';
-      if (disc) disc.style.transform = 'scale(1)';
-      icon.className = 'fa-solid fa-circle-notch fa-spin text-[#f59e0b] text-base';
-      icon.style.transform = 'rotate(0deg)';
-      text.textContent = 'Refreshing current week...';
-      return;
-    }
-
-    if (pullPx <= 0) {
-      container.style.transition = 'transform 180ms ease-out, opacity 150ms ease-out';
-      container.style.transform = 'translateY(-64px)';
-      container.style.opacity = '0';
-      if (disc) disc.style.transform = 'scale(0.6)';
-      icon.className = 'fa-solid fa-rotate-right text-[#f59e0b] text-base';
-      icon.style.transform = 'rotate(0deg)';
-      text.textContent = 'Pull to refresh current week';
-      return;
-    }
-
-    const progress = Math.min(1, pullPx / PULL_THRESHOLD);
-    const translateY = Math.round(-52 + (pullPx * 0.85));
-    const scale = (0.65 + (0.35 * progress)).toFixed(2);
-    const deg = Math.round(pullPx * 4.2);
-
-    container.style.transition = 'none';
-    container.style.transform = `translateY(${translateY}px)`;
-    container.style.opacity = String(Math.min(1, progress * 1.25));
-    if (disc) {
-      disc.style.transform = `scale(${scale})`;
-      disc.className = progress >= 1
-        ? 'w-10 h-10 rounded-full bg-[#1e293b] border-2 border-[#f59e0b] shadow-lg flex items-center justify-center text-[#f59e0b]'
-        : 'w-10 h-10 rounded-full bg-white border border-[#dee2e6] shadow-lg flex items-center justify-center text-[#f59e0b]';
-    }
-    icon.className = 'fa-solid fa-rotate-right text-base';
-    icon.style.transform = `rotate(${deg}deg)`;
-    text.textContent = progress >= 1 ? 'Release to refresh week' : 'Pull to refresh current week';
-  }
-
-  function collapsePullBar() {
-    isRefreshingPull = false;
-    startY = null;
-    currentPull = 0;
-    renderPullState(0, false);
-  }
-
-  window.__collapsePullRefreshBar = collapsePullBar;
-
-  function canStartPull(targetEl) {
-    if (isRefreshingPull) return false;
-    if (!isUserLoggedIn && !currentWeekData) return false;
-    if (targetEl && targetEl.closest && targetEl.closest('select, button, input, a, #otaModal')) return false;
-    return getScrollTop() <= 4;
-  }
-
-  function onStart(clientY, targetEl) {
-    if (!canStartPull(targetEl)) {
-      startY = null;
-      return;
-    }
-    startY = clientY;
-    currentPull = 0;
-  }
-
-  function onMove(clientY, rawEvent, targetEl) {
-    if (isRefreshingPull) return;
-    if (getScrollTop() > 4) {
-      if (currentPull > 0) resetPull();
-      startY = null;
-      return;
-    }
-    // Dynamic top-scroll latching: if user scrolled up to top in the same drag, latch startY now
-    if (startY === null) {
-      if (canStartPull(targetEl)) {
-        startY = clientY;
-        currentPull = 0;
-      }
-      return;
-    }
-
-    const delta = clientY - startY;
-    if (delta <= 0) {
-      if (currentPull > 0) renderPullState(0, false);
-      currentPull = 0;
-      return;
-    }
-
-    // CRITICAL for Android WebView: preventDefault on the very first downward frame at scrollTop=0
-    // so Chromium does not hand the touch stream to native overscroll/touchcancel.
-    if (rawEvent && rawEvent.cancelable) {
-      rawEvent.preventDefault();
-    }
-
-    // Smooth logarithmic resistance curve like Android SwipeRefreshLayout
-    currentPull = Math.min(MAX_PULL, Math.pow(delta, 0.85) * 1.15);
-    renderPullState(currentPull, false);
-  }
-
-  function resetPull() {
-    if (isRefreshingPull) return;
-    startY = null;
-    currentPull = 0;
-    renderPullState(0, false);
-  }
-
-  function onEnd() {
-    if (startY === null || isRefreshingPull) return;
-    const triggered = currentPull >= PULL_THRESHOLD;
-    startY = null;
-    if (triggered) {
-      isRefreshingPull = true;
-      currentPull = 0;
-      renderPullState(PULL_THRESHOLD, true);
-      // Refresh ONLY the current week (max_weeks = 1, sync_timeoff = false)
-      triggerSync(true, 1, false);
-    } else {
-      resetPull();
-    }
-  }
-
-  // Touch events for mobile / Android (passive: false on touchmove prevents WebView touchcancel)
-  window.addEventListener('touchstart', (e) => {
-    if (e.touches && e.touches.length === 1) {
-      onStart(e.touches[0].clientY, e.target);
-    }
-  }, { passive: true });
-
-  window.addEventListener('touchmove', (e) => {
-    if (e.touches && e.touches.length === 1) {
-      onMove(e.touches[0].clientY, e, e.target);
-    }
-  }, { passive: false });
-
-  window.addEventListener('touchend', onEnd);
-  window.addEventListener('touchcancel', () => {
-    if (currentPull >= PULL_THRESHOLD) {
-      onEnd();
-    } else {
-      resetPull();
-    }
-  });
-
-  // Mouse drag events for Desktop testing & usage
-  window.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    isMouseDown = true;
-    onStart(e.clientY, e.target);
-  });
-
-  window.addEventListener('mousemove', (e) => {
-    if (!isMouseDown) return;
-    onMove(e.clientY, null, e.target);
-  });
-
-  window.addEventListener('mouseup', () => {
-    if (!isMouseDown) return;
-    isMouseDown = false;
-    onEnd();
-  });
-}
-
 // Initialization on DOMContentLoaded
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
-  setupPullToRefresh();
   setupSmartAutoCheck();
   await checkAuthStatus();
   refreshBatteryOptimizationNotice();

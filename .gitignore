@@ -23,6 +23,7 @@ android/.gradle/
 android/local.properties
 android/app/src/main/assets/www/*.zip
 *.apk
+!Timecard-Tracker.apk
 
 # OS / Editor
 .DS_Store

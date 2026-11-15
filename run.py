@@ -113,15 +113,16 @@ def build_android_apk():
 
 
 def purge_jsdelivr_cdn(repo: str = "solotreason/TvC"):
-    """Purges jsDelivr edge cache for version.json and static/ota_bundle.zip so older APKs see updates immediately."""
+    """Purges jsDelivr edge cache for version.json, static/ota_bundle.zip, and Timecard-Tracker.apk."""
     import urllib.request
     urls = [
         f"https://purge.jsdelivr.net/gh/{repo}@main/version.json",
         f"https://purge.jsdelivr.net/gh/{repo}@main/static/ota_bundle.zip",
+        f"https://purge.jsdelivr.net/gh/{repo}@main/Timecard-Tracker.apk",
     ]
     for url in urls:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "TvC-Packer/2.4.6"})
+            req = urllib.request.Request(url, headers={"User-Agent": "TvC-Packer/2.4.7"})
             with urllib.request.urlopen(req, timeout=8.0) as resp:
                 print(f"  Purged CDN cache: {url} (HTTP {resp.status})")
         except Exception as e:
@@ -129,7 +130,7 @@ def purge_jsdelivr_cdn(repo: str = "solotreason/TvC"):
 
 
 def pack_ota(version: str = None, notes: str = None):
-    """Packs static/ directory into static/ota_bundle.zip and updates version.json."""
+    """Packs static/ directory into static/ota_bundle.zip, builds Timecard-Tracker.apk, and updates version.json."""
     import zipfile
     import json
     import time
@@ -150,7 +151,7 @@ def pack_ota(version: str = None, notes: str = None):
     if version:
         data["version"] = version.strip()
     elif "version" not in data:
-        data["version"] = "2.4.1"
+        data["version"] = "2.4.7"
 
     today_prefix = time.strftime("%Y%m%d")
     prev_build = str(data.get("build", ""))
@@ -169,11 +170,12 @@ def pack_ota(version: str = None, notes: str = None):
         data["release_notes"] = "Performance improvements and bug fixes"
 
     data["github_repo"] = data.get("github_repo", "solotreason/TvC")
+    data["apk_build"] = data["build"]
     data["ota_bundle_url"] = f"https://raw.githubusercontent.com/{data['github_repo']}/main/static/ota_bundle.zip"
-    data["apk_url"] = f"https://github.com/{data['github_repo']}/releases/latest/download/Timecard-Tracker.apk"
+    data["apk_url"] = f"https://raw.githubusercontent.com/{data['github_repo']}/main/Timecard-Tracker.apk"
     data["min_apk_version"] = data.get("min_apk_version", 1)
 
-    # Synchronize version & build numbers across index.html, MainActivity.java, and build.gradle
+    # Synchronize version & build numbers across index.html, MainActivity.java, build.gradle, and README.md
     index_html_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_html_path):
         with open(index_html_path, "r", encoding="utf-8") as f:
@@ -188,8 +190,25 @@ def pack_ota(version: str = None, notes: str = None):
             rf'\g<1>{data["build"]}\g<2>',
             html_txt
         )
+        html_txt = re.sub(
+            r'(<span[^>]*id="otaModalApkBuild"[^>]*>)[0-9]+(</span>)',
+            rf'\g<1>{data["apk_build"]}\g<2>',
+            html_txt
+        )
         with open(index_html_path, "w", encoding="utf-8") as f:
             f.write(html_txt)
+
+    readme_path = os.path.join(root_dir, "README.md")
+    if os.path.exists(readme_path):
+        with open(readme_path, "r", encoding="utf-8") as f:
+            readme_txt = f.read()
+        readme_txt = re.sub(
+            r'\*\*Version [0-9.]+ \(Build [0-9]+\)\*\*',
+            f'**Version {data["version"]} (Build {data["build"]})**',
+            readme_txt
+        )
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(readme_txt)
 
     main_java_path = os.path.join(
         root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "MainActivity.java"
@@ -243,17 +262,24 @@ def pack_ota(version: str = None, notes: str = None):
             if os.path.isfile(fpath):
                 zf.write(fpath, arcname=fname)
 
+    # Also build Timecard-Tracker.apk so both OTA and Native APK are always up to date
+    try:
+        build_android_apk()
+    except Exception as e:
+        print(f"  Warning: Could not auto-build APK during pack-ota: {e}")
+
     size_kb = os.path.getsize(zip_dest) / 1024
     print(f"\n=======================================================")
-    print(f"  OTA Package Generated Successfully!")
+    print(f"  OTA + APK Package Generated Successfully!")
     print(f"  Version:       v{data['version']} (Build {data['build']})")
     print(f"  Release Notes: {data['release_notes']}")
     print(f"  Bundle File:   {zip_dest} ({size_kb:.1f} KB)")
+    print(f"  APK File:      {os.path.join(root_dir, 'Timecard-Tracker.apk')}")
     print(f"  GitHub Repo:   https://github.com/{data['github_repo']}")
     print(f"-------------------------------------------------------")
-    print(f"  To push live update to all devices without APK reinstall:")
+    print(f"  To push live OTA + APK update to all devices:")
     print(f"    git add .")
-    print(f"    git commit -m \"OTA update v{data['version']} (build {data['build']})\"")
+    print(f"    git commit -m \"Release v{data['version']} (build {data['build']})\"")
     print(f"    git push origin main")
     print(f"    python run.py --purge-cdn")
     print(f"=======================================================\n")

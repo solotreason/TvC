@@ -1658,7 +1658,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
   }
 
-  // --- Over-The-Air (OTA) Live Updates UI Handling ---
+  // --- Over-The-Air (OTA) & Native APK Live Updates UI Handling ---
+  let latestKnownApkUrl = 'https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk';
+
   window.showOtaUpdateReadyBanner = function (details) {
     const banner = document.getElementById('otaUpdateBanner');
     const desc = document.getElementById('otaBannerDesc');
@@ -1667,7 +1669,81 @@ document.addEventListener('DOMContentLoaded', async () => {
       desc.textContent = `Version v${details.version} (Build ${details.build || ''}) downloaded from GitHub.`;
     }
     banner.classList.remove('hidden');
+    if (details && details.apk_update_available) {
+      window.showApkUpdateBanner(details);
+    }
   };
+
+  window.showApkUpdateBanner = function (details) {
+    if (details && details.apk_url) {
+      latestKnownApkUrl = details.apk_url;
+    }
+    const apkBanner = document.getElementById('apkUpdateBanner');
+    const apkDesc = document.getElementById('apkBannerDesc');
+    const modalBtn = document.getElementById('otaModalInstallApkBtn');
+    const modalBtnText = document.getElementById('otaModalInstallApkText');
+    if (apkDesc && details && details.version) {
+      apkDesc.textContent = `Native APK v${details.version} (Build ${details.apk_build || details.build || ''}) includes updated background sync & notifications.`;
+    }
+    if (apkBanner) {
+      apkBanner.classList.remove('hidden');
+    }
+    if (modalBtn) {
+      modalBtn.classList.remove('hidden');
+      if (modalBtnText && details && details.version) {
+        modalBtnText.textContent = `Install Native Update v${details.version} (.APK)`;
+      }
+    }
+  };
+
+  window.showApkDownloadStatus = function (status) {
+    const msg = document.getElementById('otaModalStatusMsg');
+    const bannerBtn = document.getElementById('apkInstallBannerBtn');
+    if (status && status.downloading) {
+      if (msg) msg.innerHTML = `<span class="text-[#0d6efd] font-semibold"><i class="fa-solid fa-cloud-arrow-down fa-spin mr-1"></i> ${status.message || 'Downloading APK from GitHub...'}</span>`;
+      if (bannerBtn) bannerBtn.textContent = 'Downloading APK...';
+    } else if (status && status.installing) {
+      if (msg) msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-brands fa-android mr-1"></i> ${status.message || 'Launching Android installer...'}</span>`;
+      if (bannerBtn) bannerBtn.textContent = 'Install APK Update';
+    } else if (status && status.error) {
+      if (msg) msg.innerHTML = `<span class="text-[#dc3545] font-semibold"><i class="fa-solid fa-triangle-exclamation mr-1"></i> ${status.message || 'APK download failed.'}</span>`;
+      if (bannerBtn) bannerBtn.textContent = 'Install APK Update';
+    }
+  };
+
+  async function triggerNativeApkInstall() {
+    try {
+      if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.downloadAndInstallApk === 'function') {
+        window.AndroidNative.downloadAndInstallApk(latestKnownApkUrl);
+        return;
+      }
+      const res = await fetch('/api/ota/install-apk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apk_url: latestKnownApkUrl })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.self_install) return;
+      }
+    } catch (e) {}
+
+    // Fallback for pre-2.4.7 factory APKs or web browsers: copy link + open direct download
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(latestKnownApkUrl);
+      }
+    } catch (e) {}
+    const msg = document.getElementById('otaModalStatusMsg');
+    if (msg) {
+      msg.innerHTML = `<div class="text-left bg-[#ecfdf5] border border-[#a7f3d0] rounded p-2 text-[#065f46] text-[11px] space-y-1">
+        <div class="font-bold"><i class="fa-solid fa-check mr-1"></i> Direct APK Link Copied to Clipboard!</div>
+        <div>Paste in Chrome to install <b>v2.4.7 APK</b> once (all future APK updates install 1-tap inside the app):</div>
+        <div class="font-mono text-[10px] break-all select-all bg-white p-1 rounded border border-[#a7f3d0]">${latestKnownApkUrl}</div>
+      </div>`;
+    }
+    if (otaModal) otaModal.classList.remove('hidden');
+  }
 
   let otaCheckTimer = null;
 
@@ -1677,14 +1753,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       otaCheckTimer = null;
     }
     const msg = document.getElementById('otaModalStatusMsg');
+    if (result && result.apk_update_available) {
+      window.showApkUpdateBanner(result);
+    }
     if (!msg) return;
 
-    if (result && result.up_to_date) {
+    if (result && result.apk_update_available) {
+      msg.innerHTML = `<span class="text-[#059669] font-bold"><i class="fa-brands fa-android mr-1"></i> Web UI up to date • Native APK v${result.version || ''} available below!</span>`;
+      refreshOtaModalInfo();
+    } else if (result && result.up_to_date) {
       msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Up to date (v${result.version || ''})</span>`;
+      refreshOtaModalInfo();
     } else if (result && result.downloading) {
       msg.innerHTML = `<span class="text-[#0d6efd] font-semibold"><i class="fa-solid fa-cloud-arrow-down fa-spin mr-1"></i> Downloading update v${result.version || ''}...</span>`;
     } else if (result && (result.update_installed || result.update_ready)) {
-      msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Update v${result.version || ''} ready! Tap reload below.</span>`;
+      msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Update v${result.version || ''} applied!</span>`;
       refreshOtaModalInfo();
     } else if (result && result.error) {
       msg.innerHTML = `<span class="text-[#dc3545] font-semibold"><i class="fa-solid fa-triangle-exclamation mr-1"></i> ${result.message || 'Check failed. Tap Check Now to retry.'}</span>`;
@@ -1697,9 +1780,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const checkOtaBtn = document.getElementById('checkOtaUpdateBtn');
   const closeOtaModalBtn = document.getElementById('closeOtaModalBtn');
   const otaModalCheckBtn = document.getElementById('otaModalCheckBtn');
+  const otaModalInstallApkBtn = document.getElementById('otaModalInstallApkBtn');
   const otaModalRollbackBtn = document.getElementById('otaModalRollbackBtn');
   const otaReloadBtn = document.getElementById('otaReloadBtn');
   const otaDismissBannerBtn = document.getElementById('otaDismissBannerBtn');
+  const apkInstallBannerBtn = document.getElementById('apkInstallBannerBtn');
+  const apkDismissBannerBtn = document.getElementById('apkDismissBannerBtn');
 
   async function refreshOtaModalInfo() {
     try {
@@ -1708,17 +1794,41 @@ document.addEventListener('DOMContentLoaded', async () => {
         const info = await res.json();
         const verEl = document.getElementById('otaModalVersion');
         const buildEl = document.getElementById('otaModalBuild');
+        const apkBuildEl = document.getElementById('otaModalApkBuild');
         const repoEl = document.getElementById('otaModalRepo');
         const footerVer = document.getElementById('footerVersionBadge');
         const footerBuild = document.getElementById('footerBuildBadge');
 
+        if (info.apk_url) latestKnownApkUrl = info.apk_url;
         if (verEl && info.version) verEl.textContent = `v${info.version}`;
         if (buildEl && info.build) buildEl.textContent = String(info.build);
+        if (apkBuildEl) {
+          apkBuildEl.textContent = String(info.apk_build || info.build || '—');
+        }
         if (repoEl && info.github_repo) repoEl.textContent = info.github_repo;
         if (footerVer && info.version) footerVer.textContent = `v${info.version}`;
         if (footerBuild && info.build) footerBuild.textContent = `Build ${info.build}`;
+
+        if (info.apk_update_available && typeof window.AndroidNative !== 'undefined') {
+          window.showApkUpdateBanner(info);
+        } else if (otaModalInstallApkBtn && typeof window.AndroidNative !== 'undefined') {
+          otaModalInstallApkBtn.classList.remove('hidden');
+        }
       }
     } catch (e) {}
+  }
+
+  if (otaModalInstallApkBtn) {
+    otaModalInstallApkBtn.addEventListener('click', () => triggerNativeApkInstall());
+  }
+  if (apkInstallBannerBtn) {
+    apkInstallBannerBtn.addEventListener('click', () => triggerNativeApkInstall());
+  }
+  if (apkDismissBannerBtn) {
+    apkDismissBannerBtn.addEventListener('click', () => {
+      const b = document.getElementById('apkUpdateBanner');
+      if (b) b.classList.add('hidden');
+    });
   }
 
   if (checkOtaBtn) {

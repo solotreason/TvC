@@ -2,7 +2,29 @@
 
 ## Status & Phases
 
-### Current Sprint: Precision Notifications (Completed Shift, Punch Edits & Option Days) + Shift-Aware Fast Polling (v2.4.6)
+### Current Sprint: Seamless OTA Auto-Apply + 1-Tap In-App Native APK Self-Updater (v2.4.7)
+
+- [x] 1. **Native In-App APK Self-Updater (`AndroidManifest.xml`, `ApkFileProvider.java`, `MainActivity.java`)**:
+  - Added `android.permission.REQUEST_INSTALL_PACKAGES` and registered a zero-dependency `ApkFileProvider` (`android.content.ContentProvider`) in `AndroidManifest.xml` to serve downloaded `.apk` files via `content://com.timecard.tracker.apkprovider/...` with `FLAG_GRANT_READ_URI_PERMISSION`.
+  - Exposed `getApkBuild()`, `apk_build`, and `apk_url` in `MainActivity.getCurrentOtaInfo()` and `AndroidNativeBridge`.
+  - Implemented `downloadAndInstallApk(String customUrl)` in `MainActivity.java`: checks `getPackageManager().canRequestPackageInstalls()` on Android 8+ (opening `Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES` and resuming install automatically once granted), downloads `Timecard-Tracker.apk` with failover (`raw.githubusercontent.com` -> `cdn.jsdelivr.net` / `github.com`), validates APK magic header (`PK`), and launches the native Android package installer prompt.
+  - Added `cleanupStaleOtaIfFactoryNewer()` on app launch so upgrading the APK automatically clears older OTA web bundles that would otherwise shadow newer factory assets.
+
+- [x] 2. **OTA Auto-Apply + Native APK Update Prompt in Web UI (`static/index.html`, `static/android_bridge.js`, `static/app.js`, `backend/app.py`)**:
+  - Auto-applied downloaded OTA web bundles seamlessly in `MainActivity.performOtaCheckAndDownload` when no sync is actively running (`dashboardWebView.clearCache(true); dashboardWebView.reload()`).
+  - Detected when `remote.apk_build > local_apk_build` (or when a pre-v2.4.7 APK lacks `getApkBuild`) during OTA check and startup, surfacing a prominent **1-Tap "Install APK Update"** banner & modal action button (`#otaModalInstallApkBtn`, `#apkUpdateBanner`).
+  - Displayed both **Web Bundle Build** and **Native APK Build** in the Updates modal (`#otaModal`).
+
+- [x] 3. **Unified OTA + APK Packaging & Git Tracking (`.gitignore`, `run.py`, `README.md`)**:
+  - Tracked `Timecard-Tracker.apk` (`~280 KB`) in git (`!Timecard-Tracker.apk` in `.gitignore`) and pointed `version.json`'s `apk_url` to `https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk` with `apk_build`.
+  - Updated `python run.py --pack-ota` so it automatically syncs version/build numbers across `version.json`, `static/index.html`, `MainActivity.java`, `android/app/build.gradle`, and `README.md`, builds `static/ota_bundle.zip`, and compiles `Timecard-Tracker.apk` in one step.
+  - Updated `README.md` to document `v2.4.7` and the unified OTA + Native APK self-update flow.
+
+- [x] 4. **Verify, Package OTA + APK, Push & Purge CDN (v2.4.7)**:
+  - Added unit test coverage in `tests/test_features.py` for `ApkFileProvider`, `REQUEST_INSTALL_PACKAGES`, and APK self-update contracts.
+  - Ran `python -m unittest discover tests -v` (20/20 passed), `python run.py --pack-ota --ver 2.4.7`, committed & pushed `Timecard-Tracker.apk` + `ota_bundle.zip` + `version.json`, and ran `python run.py --purge-cdn`.
+
+### Completed Sprint: Precision Notifications (Completed Shift, Punch Edits & Option Days) + Shift-Aware Fast Polling (v2.4.6)
 
 - [x] 1. **Option Day & Completed-Only Shift Detection Across Backend, JS Bridge & UI (`backend/database.py`, `static/android_bridge.js`, `static/app.js`)**:
   - Added `isOptionDayPayCode` / `isOptionDayShift` detection for Option Day & Option Week pay codes (`OPT`, `OPTION DAY`, `OPT DAY`, `OPW`, `OPTION WEEK`, etc.) on daily timecard rows and details.

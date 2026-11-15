@@ -732,6 +732,16 @@
       if (typeof window.showOtaCheckResult === 'function') {
         window.showOtaCheckResult(result);
       }
+    },
+    onApkUpdateAvailable: function (details) {
+      if (typeof window.showApkUpdateBanner === 'function') {
+        window.showApkUpdateBanner(details);
+      }
+    },
+    onApkDownloadStatus: function (status) {
+      if (typeof window.showApkDownloadStatus === 'function') {
+        window.showApkDownloadStatus(status);
+      }
     }
   };
 
@@ -754,10 +764,40 @@
     if (url.endsWith('/api/ota/status')) {
       if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.getOtaStatusJson) {
         try {
-          return makeJsonResponse(JSON.parse(window.AndroidNative.getOtaStatusJson()));
+          const info = JSON.parse(window.AndroidNative.getOtaStatusJson());
+          const repo = info.github_repo || 'solotreason/TvC';
+          const canSelfInstall = typeof window.AndroidNative.downloadAndInstallApk === 'function';
+          const nativeApkBuild = typeof window.AndroidNative.getApkBuild === 'function'
+            ? Number(window.AndroidNative.getApkBuild()) || 0
+            : Number(info.apk_build) || 0;
+          info.can_self_install_apk = canSelfInstall;
+          info.apk_url = info.apk_url || `https://raw.githubusercontent.com/${repo}/main/Timecard-Tracker.apk`;
+          if (nativeApkBuild > 0) {
+            info.apk_build = nativeApkBuild;
+            const targetBuild = Number(info.remote_apk_build || info.build || 0);
+            info.apk_update_available = Boolean(info.apk_update_available || (targetBuild > nativeApkBuild));
+          } else {
+            // Older factory APK (pre-v2.4.7) running newer OTA web bundle
+            info.apk_build = 'Pre-2.4.7';
+            info.apk_update_available = true;
+          }
+          return makeJsonResponse(info);
         } catch (e) {}
       }
-      return makeJsonResponse({ version: '2.4.2', build: 2026110909, github_repo: 'solotreason/TvC' });
+      return makeJsonResponse({ version: '2.4.7', build: 2026111406, apk_build: 2026111406, github_repo: 'solotreason/TvC' });
+    }
+
+    if (url.endsWith('/api/ota/install-apk')) {
+      let body = {};
+      try {
+        if (init && init.body) body = JSON.parse(init.body);
+      } catch (e) {}
+      const apkUrl = body.apk_url || 'https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk';
+      if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.downloadAndInstallApk === 'function') {
+        window.AndroidNative.downloadAndInstallApk(apkUrl);
+        return makeJsonResponse({ started: true, self_install: true });
+      }
+      return makeJsonResponse({ started: false, self_install: false, apk_url: apkUrl });
     }
 
     if (url.endsWith('/api/ota/check')) {

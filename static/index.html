@@ -100,6 +100,29 @@
     </div>
   </div>
 
+  <!-- Native Android APK Update Available Banner -->
+  <div id="apkUpdateBanner" class="hidden bg-gradient-to-r from-[#0f172a] to-[#1e293b] text-white px-4 py-2.5 shadow-md border-b-2 border-[#10b981] sticky top-14 sm:top-16 z-30 transition-all">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs sm:text-sm">
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[#10b981] text-[#0f172a] font-bold text-xs shrink-0">
+          <i class="fa-brands fa-android"></i>
+        </span>
+        <div>
+          <span class="font-bold text-[#34d399]" id="apkBannerTitle">Native App Update Available!</span>
+          <span class="text-slate-300 ml-1.5" id="apkBannerDesc">New background sync &amp; notification engine available on GitHub.</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="apkInstallBannerBtn" class="bg-[#10b981] hover:bg-[#059669] text-[#0f172a] px-3 py-1 rounded font-bold text-xs transition shadow-sm cursor-pointer whitespace-nowrap">
+          Install APK Update
+        </button>
+        <button id="apkDismissBannerBtn" class="text-slate-400 hover:text-white px-1.5 py-1 text-xs cursor-pointer">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Pull-Down-to-Refresh Indicator (Refreshes ONLY the Current Pending Week) -->
   <div id="pullRefreshContainer"
     class="overflow-hidden transition-all duration-150 ease-out bg-[#fdfaf0] border-b border-transparent flex items-center justify-center select-none"
@@ -506,11 +529,15 @@
         <div class="bg-[#f8f9fa] rounded-lg p-3 border border-[#dee2e6] space-y-1.5">
           <div class="flex justify-between">
             <span class="text-[#6c757d]">Installed Version:</span>
-            <span class="font-bold text-[#1e293b]" id="otaModalVersion">v2.4.6</span>
+            <span class="font-bold text-[#1e293b]" id="otaModalVersion">v2.4.7</span>
           </div>
           <div class="flex justify-between">
-            <span class="text-[#6c757d]">Build Timestamp:</span>
-            <span class="font-mono text-[#1e293b]" id="otaModalBuild">2026111405</span>
+            <span class="text-[#6c757d]">Web Bundle Build:</span>
+            <span class="font-mono text-[#1e293b]" id="otaModalBuild">2026111406</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-[#6c757d]">Native APK Build:</span>
+            <span class="font-mono text-[#1e293b]" id="otaModalApkBuild">2026111406</span>
           </div>
           <div class="flex justify-between">
             <span class="text-[#6c757d]">GitHub Repository:</span>
@@ -519,12 +546,15 @@
         </div>
 
         <div id="otaModalStatusMsg" class="text-center font-medium py-1 text-slate-600">
-          Updates download over-the-air from GitHub without reinstalling the APK.
+          Web updates apply automatically; Native APK updates install in 1 tap.
         </div>
 
         <div class="flex flex-col gap-2 pt-1">
           <button id="otaModalCheckBtn" class="w-full bg-[#1e293b] hover:bg-[#334155] text-white font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer">
             <i class="fa-solid fa-arrows-rotate"></i> Check GitHub for Updates
+          </button>
+          <button id="otaModalInstallApkBtn" class="hidden w-full bg-[#10b981] hover:bg-[#059669] text-[#0f172a] font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer shadow-sm">
+            <i class="fa-brands fa-android text-sm"></i> <span id="otaModalInstallApkText">Install Native App Update (.APK)</span>
           </button>
           <button id="otaModalRollbackBtn" class="w-full bg-white hover:bg-[#fff5f5] text-[#dc3545] border border-[#f8d7da] font-semibold py-1.5 px-3 rounded-lg text-[11px] transition cursor-pointer">
             Revert to Factory APK Bundle
@@ -534,8 +564,8 @@
     </div>
   </div>
 
-  <script src="/static/android_bridge.js?v=18"></script>
-  <script src="/static/app.js?v=18"></script>
+  <script src="/static/android_bridge.js?v=19"></script>
+  <script src="/static/app.js?v=19"></script>
 </body>
 
 </html>

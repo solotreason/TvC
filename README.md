@@ -1,5 +1,5 @@
 # TvC - Timecard Viewer 🕒📋🌴
-**Version 2.4.2 (Build 2026110908)**
+**Version 2.4.7 (Build 2026111406)**
 
 A fast, private, personal web dashboard and standalone Android application for tracking and auditing timecards, punch modifications, audit histories, and leave entitlements. Built with Python, FastAPI, SQLite, MongoDB Atlas cloud vault, Tailwind CSS, and Playwright for automated background sync.
 
@@ -34,9 +34,14 @@ A fast, private, personal web dashboard and standalone Android application for t
   - **Option Day (OPT)**
   - **Birthday & Anniversary**
 
-### 6. Smart Sync Architecture 🔄
-- **First-Login Full Sync (8+ Weeks)**: Automatically syncs all historical and pending weeks available in the portal dropdown on initial login or when clicking **"Sync All (8+ Weeks)"**.
-- **Pull-Down Current-Week Refresh**: Pulling down from the top of the screen (or tapping **"Refresh Current Week"**) refreshes **only the active week** (`max_weeks = 1`), skipping finalized historical weeks.
+### 6. Smart Shift-Aware Closed-App Background Sync & Precision Notifications 🔔
+- **Closed-App Background Polling (`TimecardSyncJobService`)**: Runs automatically even when the app is completely closed:
+  - **5–8m Prime Post-Shift Polling**: Checks rapidly around your typical shift end window or whenever an active clock-in punch is open.
+  - **10–12m Active Daytime Checks**: Keeps checking while today's shift is unposted, then throttles to **3h** once today's timecard or Option Day is posted (and **2h** overnight) with SHA-256 DOM fingerprint short-circuiting for near-zero battery usage.
+- **Precision Notifications**: Alerts strictly on:
+  1. **Completed Daily Timecards** (ignores clock-in-only punches until clock-out is posted).
+  2. **Supervisor Punch Modifications** (`Start Time`, `End Time`, `Meal/Unpaid`).
+  3. **Option Day Usage** (detected both when an `OPT`/`OPW` pay code posts on a daily timecard row and when your Time Off Viewer Option Day balance decreases).
 
 ### 7. High-Performance Architecture ⚡
 - **Resource Blocking**: Automatically drops images, fonts, and heavy tracking pixels, speeding up page navigation by ~70%.
@@ -56,26 +61,24 @@ Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 
 ### 2. Log In & Sync
 - **Single Auth Toggle**: Click **"Log In"** in the header to authenticate once; once signed in, the button switches to **"Log Out"**.
-- **Sync All Weeks**: Click **"Sync All (8+ Weeks)"** to sync your full multi-week history and leave bank.
-- **Pull-Down Refresh**: Pull down from the top of the page (or click **"Refresh Current Week"**) to quickly update only the current week.
+- **Sync All Weeks**: Initial login automatically syncs your full multi-week history and leave bank.
+- **Pull-Down Refresh**: Pull down from the top of the page (or click **"Sync"**) to quickly update only the current pending week.
 
-### 3. Standalone Android App & GitHub Over-The-Air (OTA) Live Updates 📱
+### 3. Standalone Android App, Auto-OTA & 1-Tap Native APK Updates 📱
 - **100% Standalone On-Phone Operation**: Runs natively without a background server (`com.timecard.tracker`).
-- **Live Over-The-Air (OTA) Updates**: Update the user interface, styling, and scraper parsers on your phone **without reinstalling the APK**!
-  - Generate an update bundle:
-    ```powershell
-    python run.py --pack-ota
-    ```
-  - Push the generated files to GitHub:
-    ```powershell
-    git add .
-    git commit -m "OTA update"
-    git push origin main
-    ```
-  - Devices running the app will automatically detect and download the update in the background. Tap **"Reload to Apply"** to activate the new version immediately.
-- **Rebuild the Standalone APK Anytime**:
+- **Seamless OTA + 1-Tap Native APK Self-Updater**:
+  - **Web UI & Parser Updates (`ota_bundle.zip`)**: Automatically download from GitHub and apply immediately on launch.
+  - **Native Android Updates (`Timecard-Tracker.apk`)**: Whenever background sync or native Java code is updated, the app displays a **1-Tap "Install APK Update"** prompt that downloads `Timecard-Tracker.apk` directly from GitHub and launches the native Android installer inside the app.
+- **Build & Package Both OTA Bundle and Standalone APK in One Command**:
   ```powershell
-  python run.py --build-apk
+  python run.py --pack-ota
+  ```
+- **Push Live Update to GitHub & Purge CDN Cache**:
+  ```powershell
+  git add .
+  git commit -m "Release update"
+  git push origin main
+  python run.py --purge-cdn
   ```
 
 ### 4. Run Automated Tests

@@ -71,8 +71,8 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026111405L;
-    private static final String APP_BASE_VERSION = "2.4.6";
+    private static final long APP_BASE_BUILD = 2026111406L;
+    private static final String APP_BASE_VERSION = "2.4.7";
 
     private WebView dashboardWebView;
     private WebView scraperWebView;
@@ -86,6 +86,9 @@ public class MainActivity extends Activity {
     private final List<String> pendingWeeksQueue = new ArrayList<>();
     private int totalWeeksToSync = 0;
     private int weeksSyncedCount = 0;
+    private volatile boolean isApkDownloading = false;
+    private boolean pendingApkInstallAfterPermission = false;
+    private String pendingApkUrl = null;
 
     private static byte[] readFileFully(File file) throws IOException {
         try (FileInputStream fis = new FileInputStream(file);
@@ -154,6 +157,24 @@ public class MainActivity extends Activity {
                     return PortalHelper.loadAppAssetResponse(MainActivity.this, uri.getPath());
                 }
                 return super.shouldInterceptRequest(view, request);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request != null ? request.getUrl() : null;
+                if (uri != null && !APP_HOST.equalsIgnoreCase(uri.getHost())) {
+                    String urlStr = uri.toString();
+                    if (urlStr.toLowerCase().contains(".apk")) {
+                        downloadAndInstallApk(urlStr);
+                        return true;
+                    }
+                    try {
+                        Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
+                        startActivity(browserIntent);
+                        return true;
+                    } catch (Exception ignored) {}
+                }
+                return false;
             }
         });
 
@@ -245,7 +266,8 @@ public class MainActivity extends Activity {
 
         setContentView(rootLayout);
 
-        // Load main application UI
+        // Load main application UI (clean up any older OTA bundle if factory APK was just upgraded)
+        cleanupStaleOtaIfFactoryNewer();
         setupNotificationChannel();
         TimecardSyncJobService.schedule(this);
         dashboardWebView.loadUrl("https://" + APP_HOST + "/index.html");
@@ -300,13 +322,40 @@ public class MainActivity extends Activity {
         return prefs.getString(PREF_KEY_GITHUB_REPO, DEFAULT_GITHUB_REPO);
     }
 
-    private JSONObject getCurrentOtaInfo() {
+    private void cleanupStaleOtaIfFactoryNewer() {
         try {
             File f = new File(getFilesDir(), OTA_VERSION_FILENAME);
             if (f.exists()) {
                 byte[] b = readFileFully(f);
                 if (b.length > 0) {
-                    return new JSONObject(new String(b, StandardCharsets.UTF_8));
+                    JSONObject otaMeta = new JSONObject(new String(b, StandardCharsets.UTF_8));
+                    long otaBuild = otaMeta.optLong("build", 0L);
+                    if (APP_BASE_BUILD >= otaBuild) {
+                        deleteDirRecursively(new File(getFilesDir(), OTA_DIR_NAME));
+                        f.delete();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private JSONObject getCurrentOtaInfo() {
+        String repo = getActiveGitHubRepo();
+        String defaultApkUrl = "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk";
+        try {
+            File f = new File(getFilesDir(), OTA_VERSION_FILENAME);
+            if (f.exists()) {
+                byte[] b = readFileFully(f);
+                if (b.length > 0) {
+                    JSONObject info = new JSONObject(new String(b, StandardCharsets.UTF_8));
+                    info.put("apk_build", APP_BASE_BUILD);
+                    info.put("apk_version", APP_BASE_VERSION);
+                    long remoteApkBuild = info.optLong("remote_apk_build", info.optLong("build", APP_BASE_BUILD));
+                    info.put("apk_update_available", remoteApkBuild > APP_BASE_BUILD);
+                    if (!info.has("apk_url")) {
+                        info.put("apk_url", defaultApkUrl);
+                    }
+                    return info;
                 }
             }
         } catch (Exception ignored) {}
@@ -314,8 +363,12 @@ public class MainActivity extends Activity {
         try {
             def.put("version", APP_BASE_VERSION);
             def.put("build", APP_BASE_BUILD);
+            def.put("apk_build", APP_BASE_BUILD);
+            def.put("apk_version", APP_BASE_VERSION);
+            def.put("apk_update_available", false);
+            def.put("apk_url", defaultApkUrl);
             def.put("is_factory", true);
-            def.put("github_repo", getActiveGitHubRepo());
+            def.put("github_repo", repo);
         } catch (Exception ignored) {}
         return def;
     }
@@ -471,23 +524,41 @@ public class MainActivity extends Activity {
                 JSONObject remote = new JSONObject(jsonStr);
                 String remoteVersion = remote.optString("version", APP_BASE_VERSION);
                 long remoteBuild = remote.optLong("build", 0L);
+                long remoteApkBuild = remote.optLong("apk_build", remoteBuild);
                 String releaseNotes = remote.optString("release_notes", "Performance improvements.");
                 String bundleUrl = remote.optString("ota_bundle_url", "https://raw.githubusercontent.com/" + repo + "/main/static/ota_bundle.zip");
+                String apkUrl = remote.optString("apk_url", "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk");
+                final boolean apkUpdateAvailable = remoteApkBuild > APP_BASE_BUILD;
 
                 JSONObject current = getCurrentOtaInfo();
                 long currentBuild = current.optLong("build", APP_BASE_BUILD);
 
                 if (remoteBuild <= currentBuild) {
-                    if (manual) {
-                        mainHandler.post(() -> {
-                            Toast.makeText(this, "TvC is up to date (v" + remoteVersion + ")", Toast.LENGTH_SHORT).show();
+                    if (apkUpdateAvailable) {
+                        current.put("remote_apk_build", remoteApkBuild);
+                        current.put("apk_url", apkUrl);
+                        saveOtaVersionInfo(current);
+                    }
+                    mainHandler.post(() -> {
+                        if (apkUpdateAvailable) {
+                            String apkJs = String.format(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onApkUpdateAvailable){window.TimecardBridge.onApkUpdateAvailable({version:%s,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}",
+                                    JSONObject.quote(remoteVersion), remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes)
+                            );
+                            dashboardWebView.evaluateJavascript(apkJs, null);
+                        }
+                        if (manual) {
+                            String toastMsg = apkUpdateAvailable
+                                    ? "Native APK update available (v" + remoteVersion + ")"
+                                    : "TvC is up to date (v" + remoteVersion + ")";
+                            Toast.makeText(this, toastMsg, Toast.LENGTH_SHORT).show();
                             String js = String.format(
-                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({up_to_date:true,version:%s,build:%d});}",
-                                    JSONObject.quote(remoteVersion), remoteBuild
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({up_to_date:%b,apk_update_available:%b,version:%s,build:%d,apk_build:%d,local_apk_build:%d,apk_url:%s});}",
+                                    !apkUpdateAvailable, apkUpdateAvailable, JSONObject.quote(remoteVersion), remoteBuild, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl)
                             );
                             dashboardWebView.evaluateJavascript(js, null);
-                        });
-                    }
+                        }
+                    });
                     return;
                 }
 
@@ -577,20 +648,28 @@ public class MainActivity extends Activity {
                 JSONObject newMeta = new JSONObject();
                 newMeta.put("version", remoteVersion);
                 newMeta.put("build", remoteBuild);
+                newMeta.put("remote_apk_build", remoteApkBuild);
+                newMeta.put("apk_url", apkUrl);
                 newMeta.put("release_notes", releaseNotes);
                 newMeta.put("github_repo", repo);
                 newMeta.put("installed_at", System.currentTimeMillis());
                 saveOtaVersionInfo(newMeta);
 
                 mainHandler.post(() -> {
-                    String js = String.format(
-                            "if(window.TimecardBridge && window.TimecardBridge.onOtaUpdateReady){window.TimecardBridge.onOtaUpdateReady({version:%s,build:%d,notes:%s});}" +
-                            "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({update_installed:true,version:%s,build:%d});}",
-                            JSONObject.quote(remoteVersion), remoteBuild, JSONObject.quote(releaseNotes),
-                            JSONObject.quote(remoteVersion), remoteBuild
-                    );
-                    dashboardWebView.evaluateJavascript(js, null);
-                    Toast.makeText(this, "Update v" + remoteVersion + " ready! Tap reload to apply.", Toast.LENGTH_LONG).show();
+                    if (!isSyncRunning && dashboardWebView != null) {
+                        Toast.makeText(this, "Updated to v" + remoteVersion + " (Build " + remoteBuild + ")!", Toast.LENGTH_SHORT).show();
+                        dashboardWebView.clearCache(true);
+                        dashboardWebView.reload();
+                    } else {
+                        String js = String.format(
+                                "if(window.TimecardBridge && window.TimecardBridge.onOtaUpdateReady){window.TimecardBridge.onOtaUpdateReady({version:%s,build:%d,apk_update_available:%b,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}" +
+                                "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({update_installed:true,apk_update_available:%b,version:%s,build:%d,apk_build:%d,local_apk_build:%d,apk_url:%s});}",
+                                JSONObject.quote(remoteVersion), remoteBuild, apkUpdateAvailable, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes),
+                                apkUpdateAvailable, JSONObject.quote(remoteVersion), remoteBuild, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl)
+                        );
+                        dashboardWebView.evaluateJavascript(js, null);
+                        Toast.makeText(this, "Update v" + remoteVersion + " ready! Tap reload to apply.", Toast.LENGTH_LONG).show();
+                    }
                 });
 
             } catch (Exception e) {
@@ -895,10 +974,114 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void downloadAndInstallApk(final String customApkUrl) {
+        if (isApkDownloading) {
+            Toast.makeText(this, "APK download already in progress...", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                pendingApkInstallAfterPermission = true;
+                pendingApkUrl = customApkUrl;
+                Toast.makeText(this, "Enable 'Allow from this source' and press Back to install", Toast.LENGTH_LONG).show();
+                try {
+                    Intent permIntent = new Intent(
+                            android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + getPackageName())
+                    );
+                    startActivity(permIntent);
+                    return;
+                } catch (Exception ignored) {}
+            }
+        }
+
+        isApkDownloading = true;
+        Toast.makeText(this, "Downloading Native APK update...", Toast.LENGTH_SHORT).show();
+        if (dashboardWebView != null) {
+            dashboardWebView.evaluateJavascript(
+                    "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({downloading:true,message:'Downloading Timecard-Tracker.apk from GitHub...'});}",
+                    null
+            );
+        }
+
+        new Thread(() -> {
+            try {
+                String repo = getActiveGitHubRepo();
+                long ts = System.currentTimeMillis();
+                String primaryUrl = (customApkUrl != null && !customApkUrl.trim().isEmpty())
+                        ? customApkUrl.trim()
+                        : ("https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk");
+                String primaryCacheBusted = primaryUrl + (primaryUrl.contains("?") ? "&t=" : "?t=") + ts;
+                String[] candidateApkUrls = new String[] {
+                        primaryCacheBusted,
+                        "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk?t=" + ts,
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/Timecard-Tracker.apk?t=" + ts,
+                        "https://github.com/" + repo + "/releases/latest/download/Timecard-Tracker.apk"
+                };
+
+                File apkFile = ApkFileProvider.getApkUpdateFile(MainActivity.this);
+                boolean ok = downloadBundleWithFailover(candidateApkUrls, apkFile, 12000);
+                boolean validApk = false;
+                if (ok && apkFile.exists() && apkFile.length() > 50000) {
+                    try (FileInputStream fis = new FileInputStream(apkFile)) {
+                        int b0 = fis.read();
+                        int b1 = fis.read();
+                        validApk = (b0 == 'P' && b1 == 'K');
+                    } catch (Exception ignored) {}
+                }
+
+                if (!validApk) {
+                    if (apkFile.exists()) apkFile.delete();
+                    isApkDownloading = false;
+                    mainHandler.post(() -> {
+                        Toast.makeText(MainActivity.this, "Could not download APK from GitHub", Toast.LENGTH_LONG).show();
+                        if (dashboardWebView != null) {
+                            dashboardWebView.evaluateJavascript(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({error:true,message:'Failed to download APK from GitHub.'});}",
+                                    null
+                            );
+                        }
+                    });
+                    return;
+                }
+
+                isApkDownloading = false;
+                mainHandler.post(() -> {
+                    if (dashboardWebView != null) {
+                        dashboardWebView.evaluateJavascript(
+                                "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({installing:true,message:'Launching Android installer...'});}",
+                                null
+                        );
+                    }
+                    try {
+                        Uri apkUri = ApkFileProvider.getApkContentUri();
+                        Intent installIntent = new Intent(Intent.ACTION_VIEW);
+                        installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+                        installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(installIntent);
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "Installer error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    }
+                });
+            } catch (Exception e) {
+                isApkDownloading = false;
+                mainHandler.post(() -> Toast.makeText(MainActivity.this, "APK update failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        }).start();
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         TimecardSyncJobService.schedule(this);
+        if (pendingApkInstallAfterPermission) {
+            pendingApkInstallAfterPermission = false;
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls()) {
+                final String urlToInstall = pendingApkUrl;
+                pendingApkUrl = null;
+                mainHandler.postDelayed(() -> downloadAndInstallApk(urlToInstall), 350);
+            }
+        }
         if (dashboardWebView != null) {
             handleNotificationIntent(getIntent());
             dashboardWebView.evaluateJavascript(
@@ -1052,6 +1235,16 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String getOtaStatusJson() {
             return getCurrentOtaInfo().toString();
+        }
+
+        @JavascriptInterface
+        public long getApkBuild() {
+            return APP_BASE_BUILD;
+        }
+
+        @JavascriptInterface
+        public void downloadAndInstallApk(String customUrl) {
+            mainHandler.post(() -> MainActivity.this.downloadAndInstallApk(customUrl));
         }
 
         @JavascriptInterface

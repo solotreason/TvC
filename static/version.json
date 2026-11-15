@@ -1,9 +1,10 @@
 {
-  "version": "2.4.6",
-  "build": 2026111405,
+  "version": "2.4.7",
+  "build": 2026111406,
   "min_apk_version": 1,
-  "release_notes": "Precision notifications for completed timecards, supervisor punch edits & Option Day usage (daily card + Time Off bank) with smart shift-aware background polling",
+  "release_notes": "Auto-apply OTA web updates + 1-tap in-app Native APK self-updater from GitHub",
   "github_repo": "solotreason/TvC",
   "ota_bundle_url": "https://raw.githubusercontent.com/solotreason/TvC/main/static/ota_bundle.zip",
-  "apk_url": "https://github.com/solotreason/TvC/releases/latest/download/Timecard-Tracker.apk"
+  "apk_url": "https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk",
+  "apk_build": 2026111406
 }

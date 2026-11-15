@@ -274,18 +274,34 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("window.TimecardBridge.ingestTimeoffHtml", job_src)
         self.assertIn("recordBackgroundSyncComplete", job_src)
 
-        # Verify disk reload & foreground refresh bridges + adaptive icon manifest
+        # Verify disk reload & foreground refresh bridges + adaptive icon manifest + APK self-updater
+        main_activity_path = os.path.join(root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "MainActivity.java")
+        apk_provider_path = os.path.join(root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "ApkFileProvider.java")
+        with open(main_activity_path, "r", encoding="utf-8") as f:
+            main_src = f.read()
+        with open(apk_provider_path, "r", encoding="utf-8") as f:
+            provider_src = f.read()
+
         self.assertIn("reloadFromDiskIfUpdated", bridge_src)
         self.assertIn("getNewTimecardsJson", bridge_src)
         self.assertIn("getOptionDayAlertsJson", bridge_src)
         self.assertIn("isOptionDayPayCode", bridge_src)
+        self.assertIn("onApkUpdateAvailable", bridge_src)
         self.assertIn("isOptionDayShift", app_js_src)
         self.assertIn("syncFromNativeDiskIfUpdated", app_js_src)
         self.assertIn("refreshDashboardFromStore", app_js_src)
+        self.assertIn("triggerNativeApkInstall", app_js_src)
         self.assertIn('id="batteryOptNotice"', html_src)
         self.assertIn('id="dismissBatteryOptBtn"', html_src)
+        self.assertIn('id="apkUpdateBanner"', html_src)
+        self.assertIn('id="otaModalInstallApkBtn"', html_src)
         self.assertIn("REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", manifest_src)
+        self.assertIn("REQUEST_INSTALL_PACKAGES", manifest_src)
+        self.assertIn("com.timecard.tracker.apkprovider", manifest_src)
         self.assertIn("@mipmap/ic_launcher", manifest_src)
+        self.assertIn("downloadAndInstallApk", main_src)
+        self.assertIn("cleanupStaleOtaIfFactoryNewer", main_src)
+        self.assertIn("application/vnd.android.package-archive", provider_src)
 
     @classmethod
     def tearDownClass(cls):

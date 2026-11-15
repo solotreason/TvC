@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026111406L;
+    private static final long APP_BASE_BUILD = 2026111407L;
     private static final String APP_BASE_VERSION = "2.4.7";
 
     private WebView dashboardWebView;

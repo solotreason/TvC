@@ -71,8 +71,8 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026112208L;
-    private static final String APP_BASE_VERSION = "2.5.1";
+    private static final long APP_BASE_BUILD = 2026112209L;
+    private static final String APP_BASE_VERSION = "2.4.9";
 
     private WebView dashboardWebView;
     private WebView scraperWebView;
@@ -81,10 +81,9 @@ public class MainActivity extends Activity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private boolean isSyncRunning = false;
+    private boolean isInteractiveLoginMode = false;
     private int requestedMaxWeeks = 0; // 0 = all 8+ weeks, 1 = current week only
     private boolean requestedSyncTimeoff = true;
-    private boolean isInteractiveLoginRequested = false;
-    private boolean sawSsoLoginPageDuringFlow = false;
     private final List<String> pendingWeeksQueue = new ArrayList<>();
     private int totalWeeksToSync = 0;
     private int weeksSyncedCount = 0;
@@ -131,41 +130,38 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Returns true when a URL belongs to the destination portal host (rather than an external SSO/2FA sign-in provider).
-     * Used to keep the portal UI strictly invisible (alpha=0, overlay hidden) so only the SSO login prompt is ever shown.
+     * Returns true when a URL belongs to the destination portal (as opposed to external Microsoft SSO/2FA pages).
+     * Used to keep the portal's visual background 100% hidden while allowing SSO sign-in prompts to render.
      */
-    private boolean isPortalHostUrl(String url) {
+    private boolean isPortalDestinationUrl(String url) {
         if (url == null || url.isEmpty()) return false;
         String lower = url.toLowerCase();
         if ("about:blank".equals(lower)) return true;
+        if (lower.contains("login.microsoftonline.com")
+                || lower.contains("login.live.com")
+                || lower.contains("mysignins.microsoft.com")
+                || lower.contains("microsoft.com/devicelogin")
+                || lower.contains("autologon.microsoftazuread-sso.com")
+                || lower.contains("device.login.microsoftonline.com")
+                || lower.contains("ping")
+                || lower.contains("federation")
+                || lower.contains("saml")
+                || lower.contains("oauth")) {
+            return false;
+        }
         String portalBase = getPortalBaseUrl().toLowerCase();
-        return (!portalBase.isEmpty() && lower.startsWith(portalBase))
-                || lower.contains("time-card-viewer")
-                || lower.contains("time-off-viewer")
-                || lower.contains("/tools-and-resources/pay-and-benefits/");
+        return lower.startsWith(portalBase)
+                || lower.contains("/time-card-viewer")
+                || lower.contains("/time-off-viewer")
+                || lower.contains("/tools-and-resources/");
     }
 
-    private void cloakPortalSurfaceInScraper(WebView view, String url) {
+    private void maskPortalPageVisuals(WebView view) {
         if (view == null) return;
-        if (isPortalHostUrl(url)) {
-            // Never allow the raw portal page background to render visibly on screen
-            view.setAlpha(0f);
-            view.evaluateJavascript(
-                    "(function(){try{if(document.documentElement){document.documentElement.style.opacity='0';}}catch(e){}})();",
-                    null
-            );
-            if (sawSsoLoginPageDuringFlow && loginOverlayContainer != null && loginOverlayContainer.getVisibility() == View.VISIBLE) {
-                loginOverlayContainer.setVisibility(View.GONE);
-                sendProgressToDashboard(22, "Authenticated", "Sign-in complete! Loading your timecards in background...", false);
-            }
-        } else if (url != null && url.startsWith("http")) {
-            // External SSO / Microsoft 2FA login host: make visible when interactive login is active
-            sawSsoLoginPageDuringFlow = true;
-            view.setAlpha(1f);
-            if (isInteractiveLoginRequested && loginOverlayContainer != null && loginOverlayContainer.getVisibility() != View.VISIBLE) {
-                loginOverlayContainer.setVisibility(View.VISIBLE);
-            }
-        }
+        view.evaluateJavascript(
+                "(function(){try{if(document.documentElement){document.documentElement.style.opacity='0';document.documentElement.style.background='#1e293b';}}catch(e){}})();",
+                null
+        );
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -256,7 +252,11 @@ public class MainActivity extends Activity {
         closeBtn.setTextColor(Color.parseColor("#1E293B"));
         closeBtn.setBackgroundColor(Color.parseColor("#F59E0B"));
         closeBtn.setPadding(dpToPx(10), dpToPx(4), dpToPx(10), dpToPx(4));
-        closeBtn.setOnClickListener(v -> loginOverlayContainer.setVisibility(View.GONE));
+        closeBtn.setOnClickListener(v -> {
+            isInteractiveLoginMode = false;
+            if (scraperWebView != null) scraperWebView.setAlpha(0f);
+            loginOverlayContainer.setVisibility(View.GONE);
+        });
         topBar.addView(closeBtn, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -278,11 +278,12 @@ public class MainActivity extends Activity {
         scraperWebView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                // Resource blocking: also block portal background images/fonts even during login flow
+                // Always block images/logos/backgrounds when hidden OR when loading the portal destination
                 if (request != null && request.getUrl() != null) {
                     String reqUrl = request.getUrl().toString();
-                    boolean isOverlayHidden = loginOverlayContainer.getVisibility() != View.VISIBLE;
-                    if ((isOverlayHidden || isPortalHostUrl(reqUrl)) && PortalHelper.isBlockedBackgroundAsset(reqUrl)) {
+                    boolean onPortalPage = isPortalDestinationUrl(reqUrl);
+                    if ((loginOverlayContainer.getVisibility() != View.VISIBLE || onPortalPage)
+                            && PortalHelper.isBlockedBackgroundAsset(reqUrl)) {
                         return PortalHelper.emptyAssetResponse();
                     }
                 }
@@ -290,22 +291,51 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                String targetUrl = (request != null && request.getUrl() != null) ? request.getUrl().toString() : "";
+                if (isPortalDestinationUrl(targetUrl)) {
+                    // Hide overlay BEFORE a single pixel of the portal timecard background can render
+                    view.setAlpha(0f);
+                    loginOverlayContainer.setVisibility(View.GONE);
+                }
+                return false;
+            }
+
+            @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
-                cloakPortalSurfaceInScraper(view, url);
+                if (isPortalDestinationUrl(url)) {
+                    view.setAlpha(0f);
+                    loginOverlayContainer.setVisibility(View.GONE);
+                    maskPortalPageVisuals(view);
+                } else if (isInteractiveLoginMode && url != null && !url.isEmpty()) {
+                    view.setAlpha(1f);
+                    loginOverlayContainer.setVisibility(View.VISIBLE);
+                }
             }
 
             @Override
             public void onPageCommitVisible(WebView view, String url) {
                 super.onPageCommitVisible(view, url);
-                cloakPortalSurfaceInScraper(view, url);
+                if (isPortalDestinationUrl(url)) {
+                    view.setAlpha(0f);
+                    loginOverlayContainer.setVisibility(View.GONE);
+                    maskPortalPageVisuals(view);
+                }
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                cloakPortalSurfaceInScraper(view, url);
                 CookieManager.getInstance().flush();
+                if (isPortalDestinationUrl(url)) {
+                    view.setAlpha(0f);
+                    loginOverlayContainer.setVisibility(View.GONE);
+                    maskPortalPageVisuals(view);
+                } else if (isInteractiveLoginMode && url != null && !url.isEmpty()) {
+                    view.setAlpha(1f);
+                    loginOverlayContainer.setVisibility(View.VISIBLE);
+                }
                 PortalHelper.injectMicrosoftSecurityBypass(MainActivity.this, view);
             }
         });
@@ -781,7 +811,14 @@ public class MainActivity extends Activity {
 
     private void sendFinishToDashboard(boolean success, String msg, int weeksSynced, boolean reqLogin) {
         isSyncRunning = false;
+        isInteractiveLoginMode = false;
         mainHandler.post(() -> {
+            if (loginOverlayContainer != null) {
+                loginOverlayContainer.setVisibility(View.GONE);
+            }
+            if (scraperWebView != null) {
+                scraperWebView.setAlpha(0f);
+            }
             String js = String.format(
                     "if(window.TimecardBridge){window.TimecardBridge.finishSync(%b,%s,%d,%b);}",
                     success, JSONObject.quote(msg), weeksSynced, reqLogin
@@ -810,13 +847,13 @@ public class MainActivity extends Activity {
         String checkJs = "(function(){" +
                 "var w = document.querySelector('.timecard-wrapper');" +
                 "if (w) {" +
-                "  try { document.documentElement.style.opacity = '0'; } catch(e) {}" +
+                "  try { if (document.documentElement) document.documentElement.style.opacity = '0'; } catch(e) {}" +
                 "  var loader = document.querySelector('#tcvLoader');" +
                 "  var loaderVisible = loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none';" +
                 "  var rows = document.querySelectorAll('tr.timecard-card');" +
                 "  var opts = document.querySelectorAll('.timecard-date-dropdown select option');" +
                 "  if (!loaderVisible && (rows.length > 0 || opts.length > 0)) return 'READY';" +
-                "  return 'WRAPPER_LOADING';" +
+                "  return 'PORTAL_LOADING';" +
                 "}" +
                 "var kmsiBtn = document.querySelector('#idSIButton9');" +
                 "var isKmsi = document.querySelector('#KmsiDescription') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
@@ -853,50 +890,46 @@ public class MainActivity extends Activity {
         scraperWebView.evaluateJavascript(checkJs, value -> {
             String status = value != null ? value.replace("\"", "") : "WAITING";
             if ("READY".equals(status)) {
-                isInteractiveLoginRequested = false;
+                isInteractiveLoginMode = false;
                 setAuthenticatedFlag(true);
                 CookieManager.getInstance().flush();
-                scraperWebView.setAlpha(0f);
+                if (scraperWebView != null) scraperWebView.setAlpha(0f);
                 loginOverlayContainer.setVisibility(View.GONE);
                 sendProgressToDashboard(25, "Processing", "Time Card Viewer loaded. Expanding shift cards...", false);
-                mainHandler.postDelayed(this::extractInitialWeekAndQueueDropdown, 700);
-            } else if ("WRAPPER_LOADING".equals(status)) {
-                // Immediately hide the login sheet as soon as the portal wrapper exists (even while #tcvLoader is spinning)
-                isInteractiveLoginRequested = false;
+                mainHandler.postDelayed(this::extractInitialWeekAndQueueDropdown, 500);
+            } else if ("PORTAL_LOADING".equals(status)) {
+                // Portal page reached after 2FA: hide overlay immediately so the portal background never shows!
+                isInteractiveLoginMode = false;
                 setAuthenticatedFlag(true);
-                scraperWebView.setAlpha(0f);
-                if (loginOverlayContainer.getVisibility() == View.VISIBLE) {
-                    loginOverlayContainer.setVisibility(View.GONE);
-                    sendProgressToDashboard(22, "Authenticated", "Sign-in complete! Loading your timecards in background...", false);
-                }
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 450);
+                CookieManager.getInstance().flush();
+                if (scraperWebView != null) scraperWebView.setAlpha(0f);
+                loginOverlayContainer.setVisibility(View.GONE);
+                sendProgressToDashboard(20, "Authenticated", "Signed in! Loading your timecards in background...", false);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 400);
             } else if ("FORCE_REDIRECT_PORTAL".equals(status)) {
-                scraperWebView.setAlpha(0f);
+                if (scraperWebView != null) scraperWebView.setAlpha(0f);
                 loginOverlayContainer.setVisibility(View.GONE);
                 scraperWebView.loadUrl(getTimecardPortalUrl());
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 1500);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 1000);
             } else if ("BYPASSING_SECURITY".equals(status) || "BYPASSING_KMSI".equals(status)) {
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 700);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 500);
             } else if ("LOGIN".equals(status)) {
-                if (isInteractiveLoginRequested) {
-                    sawSsoLoginPageDuringFlow = true;
-                    scraperWebView.setAlpha(1f);
-                    if (loginOverlayContainer.getVisibility() != View.VISIBLE) {
-                        loginOverlayContainer.setVisibility(View.VISIBLE);
-                    }
+                if (isInteractiveLoginMode) {
+                    if (scraperWebView != null) scraperWebView.setAlpha(1f);
+                    loginOverlayContainer.setVisibility(View.VISIBLE);
                     sendProgressToDashboard(15, "Login Required", "Please sign in and complete 2FA in the window...", true);
-                    mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 1000);
+                    mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 800);
                 } else {
                     // In background sync, never flash the login window over the dashboard.
-                    // Allow up to 8 polling attempts (~7s) for silent cookie SSO redirects.
+                    // Allow up to 8 polling attempts (~6s) for silent cookie SSO redirects.
                     if (attempt < 8) {
-                        mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 800);
+                        mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 700);
                     } else {
                         sendFinishToDashboard(false, "Session authentication required. Tap Log In to connect.", weeksSyncedCount, true);
                     }
                 }
             } else {
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 800);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 500);
             }
         });
     }
@@ -1171,6 +1204,8 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         if (loginOverlayContainer != null && loginOverlayContainer.getVisibility() == View.VISIBLE) {
+            isInteractiveLoginMode = false;
+            if (scraperWebView != null) scraperWebView.setAlpha(0f);
             loginOverlayContainer.setVisibility(View.GONE);
             return;
         }
@@ -1261,11 +1296,10 @@ public class MainActivity extends Activity {
             mainHandler.post(() -> {
                 TimecardSyncJobService.schedule(MainActivity.this);
                 // On first login, automatically sync all 8+ weeks as soon as login completes.
-                // Keep loginOverlayContainer hidden and scraperWebView cloaked (alpha=0) until
-                // the redirect lands on the external SSO login page so the portal background never shows.
+                // Keep loginOverlayContainer hidden until scraperWebView redirects to external SSO login page
+                // so the portal's own timecard background never flashes.
                 isSyncRunning = true;
-                isInteractiveLoginRequested = true;
-                sawSsoLoginPageDuringFlow = false;
+                isInteractiveLoginMode = true;
                 requestedMaxWeeks = 0;
                 requestedSyncTimeoff = true;
                 weeksSyncedCount = 0;
@@ -1274,9 +1308,9 @@ public class MainActivity extends Activity {
                     scraperWebView.setAlpha(0f);
                 }
                 loginOverlayContainer.setVisibility(View.GONE);
-                sendProgressToDashboard(12, "Connecting to Sign-In", "Opening Single Sign-On...", false);
+                sendProgressToDashboard(12, "Connecting to Sign-In", "Opening secure SSO sign-in...", false);
                 scraperWebView.loadUrl(getTimecardPortalUrl());
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 650);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 400);
             });
         }
 
@@ -1284,8 +1318,7 @@ public class MainActivity extends Activity {
         public void startBackgroundSyncWithOptions(int maxWeeks, boolean syncTimeoff) {
             mainHandler.post(() -> {
                 isSyncRunning = true;
-                isInteractiveLoginRequested = false;
-                sawSsoLoginPageDuringFlow = false;
+                isInteractiveLoginMode = false;
                 requestedMaxWeeks = maxWeeks;
                 requestedSyncTimeoff = syncTimeoff;
                 weeksSyncedCount = 0;

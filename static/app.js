@@ -7,6 +7,7 @@ let latestNotifiedTarget = null;
 let pollStatusInterval = null;
 let isSilentSync = false;
 let lastSmartCheckAt = 0;
+let lastTimeoffSyncAt = 0;
 let smartCheckTimer = null;
 const SMART_CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const SMART_RESUME_MIN_GAP_MS = 5 * 60 * 1000; // 5 minutes on app resume
@@ -994,6 +995,9 @@ async function loadTimeOff() {
       tbody.innerHTML = `<tr><td colspan="4" class="p-6 text-center text-[#6c757d]">No entitlement records found.</td></tr>`;
       return;
     }
+    if (lastTimeoffSyncAt === 0) {
+      lastTimeoffSyncAt = Number(data.synced_at_ms) || Date.now();
+    }
 
     entitlements.forEach(item => {
       const tr = document.createElement('tr');
@@ -1530,10 +1534,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadWeekDetails(e.target.value);
   });
 
-  // "Sync" button syncs ONLY the current pending week (initial Login already syncs all 8+ weeks)
+  // Smart Tab-Aware "Sync" button:
+  // Fast current-week-only sync on the Time Card tab, and also refreshes the Time Off Entitlement Bank
+  // when on the Time Off tab (#viewTimeOff) or when Time Off hasn't been synced in > 30 minutes.
   document.getElementById('syncBtn').addEventListener('click', () => {
     requestBrowserNotificationPermission();
-    triggerSync(true, 1, false);
+    const viewTimeOff = document.getElementById('viewTimeOff');
+    const isTimeOffTabActive = !!(viewTimeOff && !viewTimeOff.classList.contains('hidden'));
+    const isTimeOffStale = (Date.now() - lastTimeoffSyncAt) > (30 * 60 * 1000);
+    const shouldSyncTimeoff = isTimeOffTabActive || isTimeOffStale;
+    if (shouldSyncTimeoff) {
+      lastTimeoffSyncAt = Date.now();
+    }
+    triggerSync(true, 1, shouldSyncTimeoff);
   });
 
   const loginFallbackBtn = document.getElementById('loginFallbackBtn');

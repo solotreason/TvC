@@ -75,5 +75,73 @@ class TestTimecardParser(unittest.TestCase):
         self.assertEqual(len(stored_wed["details"]), 6)
         print("\nAll activeRow multi-segment tests passed!")
 
+    def test_parse_edge_case_html_snapshots(self):
+        """Tests raw HTML parsing of Option Day, VACATION - EMPLOYEE PREPAID, and clock-in-only shifts."""
+        from backend.database import is_option_day_pay_code, is_excluded_alert_pay_code, is_shift_completed
+        edge_html = """
+        <div class="timecard-wrapper">
+          <div class="timecard-date-dropdown">
+            <select><option value="2026-12-26" selected>Week Ending 12/26/2026 - Pending</option></select>
+          </div>
+          <div class="timecard-summary">
+            <span class="weekGrossPay">$751.68</span>
+            <span class="weekTotalHours">16.00</span>
+            <div class="timecard-wrapper__lastUpdated"><span>12/23/2026 09:30 AM</span></div>
+          </div>
+          <div class="timecard-list-view">
+            <table><tbody>
+              <tr class="timecard-card" data-date="2026-12-21">
+                <td>Mon 12/21/2026</td>
+                <td>OPTION DAY</td>
+                <td>N/A</td>
+                <td>N/A</td>
+                <td>0.00</td>
+                <td>$46.98</td>
+                <td>8.00</td>
+                <td>$375.84</td>
+              </tr>
+              <tr class="timecard-card" data-date="2026-12-22">
+                <td>Tue 12/22/2026</td>
+                <td>VACATION - EMPLOYEE PREPAID</td>
+                <td>9.00</td>
+                <td>17.00</td>
+                <td>0.00</td>
+                <td>$46.98</td>
+                <td>8.00</td>
+                <td>$375.84</td>
+              </tr>
+              <tr class="timecard-card" data-date="2026-12-23">
+                <td>Wed 12/23/2026</td>
+                <td>PAY ACTUAL</td>
+                <td>9.25*</td>
+                <td>N/A</td>
+                <td>0.00</td>
+                <td>$46.98</td>
+                <td>0.00</td>
+                <td>$0.00</td>
+              </tr>
+            </tbody></table>
+          </div>
+        </div>
+        """
+        res = parse_timecard_html(edge_html)
+        shifts = res["shifts"]
+        self.assertEqual(len(shifts), 3)
+
+        mon_opt = next(s for s in shifts if s["date"] == "2026-12-21")
+        self.assertTrue(is_option_day_pay_code(mon_opt["pay_code"], mon_opt.get("details")))
+        self.assertFalse(is_excluded_alert_pay_code(mon_opt["pay_code"], mon_opt.get("details")))
+
+        tue_vac = next(s for s in shifts if s["date"] == "2026-12-22")
+        self.assertTrue(is_excluded_alert_pay_code(tue_vac["pay_code"], tue_vac.get("details")))
+        self.assertFalse(is_shift_completed(tue_vac))
+        self.assertFalse(is_option_day_pay_code(tue_vac["pay_code"], tue_vac.get("details")))
+
+        wed_open = next(s for s in shifts if s["date"] == "2026-12-23")
+        self.assertEqual(wed_open["is_late"], 1)
+        self.assertIsNotNone(wed_open["start_time_dec"])
+        self.assertIsNone(wed_open["end_time_dec"])
+        self.assertFalse(is_shift_completed(wed_open))
+
 if __name__ == "__main__":
     unittest.main()

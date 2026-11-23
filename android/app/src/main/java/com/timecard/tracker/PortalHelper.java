@@ -256,7 +256,7 @@ final class PortalHelper {
             String canonicalTarget = otaFile.getCanonicalPath();
             if (canonicalTarget.startsWith(canonicalBase)
                     && otaFile.exists() && otaFile.isFile() && otaFile.length() > 0) {
-                return new WebResourceResponse(getMimeType(relPath), "UTF-8", new FileInputStream(otaFile));
+                return buildUncachedAssetResponse(getMimeType(relPath), new FileInputStream(otaFile));
             }
         } catch (Exception ignored) {}
 
@@ -264,10 +264,19 @@ final class PortalHelper {
         String assetPath = "www/" + relPath;
         try {
             InputStream is = context.getAssets().open(assetPath);
-            return new WebResourceResponse(getMimeType(assetPath), "UTF-8", is);
+            return buildUncachedAssetResponse(getMimeType(assetPath), is);
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static WebResourceResponse buildUncachedAssetResponse(String mimeType, InputStream data) {
+        WebResourceResponse resp = new WebResourceResponse(mimeType, "UTF-8", data);
+        LinkedHashMap<String, String> headers = new LinkedHashMap<>();
+        headers.put("Cache-Control", "no-store, no-cache, must-revalidate");
+        headers.put("Pragma", "no-cache");
+        resp.setResponseHeaders(headers);
+        return resp;
     }
 
     /** Maps common web extensions to MIME types. */

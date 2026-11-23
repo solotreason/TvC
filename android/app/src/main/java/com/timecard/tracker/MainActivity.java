@@ -71,8 +71,8 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026112203L;
-    private static final String APP_BASE_VERSION = "2.5.0";
+    private static final long APP_BASE_BUILD = 2026112204L;
+    private static final String APP_BASE_VERSION = "2.5.1";
 
     private WebView dashboardWebView;
     private WebView scraperWebView;
@@ -85,12 +85,17 @@ public class MainActivity extends Activity {
     private boolean requestedSyncTimeoff = true;
     private boolean isInteractiveLoginRequested = false;
     private boolean sawSsoLoginPageDuringFlow = false;
+    private int syncRetryCount = 0;
+    private static final int MAX_SYNC_RETRIES = 1;
+    private static final long SYNC_WATCHDOG_TIMEOUT_MS = 45000L;
+    private final Runnable syncWatchdogRunnable = this::handleSyncTimeoutOrRetry;
     private final List<String> pendingWeeksQueue = new ArrayList<>();
     private int totalWeeksToSync = 0;
     private int weeksSyncedCount = 0;
     private volatile boolean isApkDownloading = false;
     private boolean pendingApkInstallAfterPermission = false;
     private String pendingApkUrl = null;
+    private String pendingApkExpectedSha256 = null;
 
     private static byte[] readFileFully(File file) throws IOException {
         try (FileInputStream fis = new FileInputStream(file);
@@ -187,7 +192,7 @@ public class MainActivity extends Activity {
         dashboardWebView = new WebView(this);
         setupWebViewDefaults(dashboardWebView);
         dashboardWebView.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        dashboardWebView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+        dashboardWebView.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
         dashboardWebView.addJavascriptInterface(new AndroidNativeBridge(), "AndroidNative");
         dashboardWebView.setWebChromeClient(new WebChromeClient());
         dashboardWebView.setWebViewClient(new WebViewClient() {
@@ -519,6 +524,36 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    private static String computeFileSha256(File file) {
+        if (file == null || !file.exists()) return "";
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            try (FileInputStream fis = new FileInputStream(file)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = fis.read(buf)) > 0) {
+                    digest.update(buf, 0, n);
+                }
+            }
+            byte[] hash = digest.digest();
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(String.format(java.util.Locale.US, "%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static boolean verifyFileSha256(File file, String expectedSha256) {
+        if (expectedSha256 == null || expectedSha256.trim().isEmpty()) {
+            return true;
+        }
+        String actual = computeFileSha256(file);
+        return !actual.isEmpty() && actual.equalsIgnoreCase(expectedSha256.trim());
+    }
+
     private boolean downloadBundleWithFailover(String[] urls, File destinationFile, int timeoutMs) {
         for (String urlStr : urls) {
             HttpURLConnection conn = null;
@@ -585,6 +620,11 @@ public class MainActivity extends Activity {
                 String releaseNotes = remote.optString("release_notes", "Performance improvements.");
                 String bundleUrl = remote.optString("ota_bundle_url", "https://raw.githubusercontent.com/" + repo + "/main/static/ota_bundle.zip");
                 String apkUrl = remote.optString("apk_url", "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk");
+                String expectedOtaSha256 = remote.optString("ota_sha256", "");
+                String expectedApkSha256 = remote.optString("apk_sha256", "");
+                if (!expectedApkSha256.isEmpty()) {
+                    pendingApkExpectedSha256 = expectedApkSha256;
+                }
                 final boolean apkUpdateAvailable = remoteApkBuild > APP_BASE_BUILD;
 
                 JSONObject current = getCurrentOtaInfo();
@@ -594,6 +634,7 @@ public class MainActivity extends Activity {
                     if (apkUpdateAvailable) {
                         current.put("remote_apk_build", remoteApkBuild);
                         current.put("apk_url", apkUrl);
+                        if (!expectedApkSha256.isEmpty()) current.put("apk_sha256", expectedApkSha256);
                         saveOtaVersionInfo(current);
                     }
                     mainHandler.post(() -> {
@@ -638,12 +679,13 @@ public class MainActivity extends Activity {
                 };
 
                 boolean downloaded = downloadBundleWithFailover(candidateBundleUrls, zipFile, 8000);
-                if (!downloaded) {
+                if (!downloaded || !verifyFileSha256(zipFile, expectedOtaSha256)) {
+                    if (zipFile.exists()) zipFile.delete();
                     if (manual) {
                         mainHandler.post(() -> {
-                            Toast.makeText(this, "Failed downloading update package", Toast.LENGTH_SHORT).show();
+                            Toast.makeText(this, "Failed downloading or verifying update package", Toast.LENGTH_SHORT).show();
                             dashboardWebView.evaluateJavascript(
-                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Failed downloading update package.'});}",
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Failed downloading or verifying update package.'});}",
                                     null
                             );
                         });
@@ -779,14 +821,55 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void armSyncWatchdog() {
+        mainHandler.removeCallbacks(syncWatchdogRunnable);
+        if (!isInteractiveLoginRequested) {
+            mainHandler.postDelayed(syncWatchdogRunnable, SYNC_WATCHDOG_TIMEOUT_MS);
+        }
+    }
+
+    private void cancelSyncWatchdog() {
+        mainHandler.removeCallbacks(syncWatchdogRunnable);
+    }
+
+    private void handleSyncTimeoutOrRetry() {
+        if (!isSyncRunning) return;
+        if (isInteractiveLoginRequested || (loginOverlayContainer != null && loginOverlayContainer.getVisibility() == View.VISIBLE)) {
+            return;
+        }
+        boolean cookiesValid = checkCookiesLoggedIn();
+        if (syncRetryCount < MAX_SYNC_RETRIES && cookiesValid && scraperWebView != null) {
+            syncRetryCount++;
+            sendProgressToDashboard(18, "Retrying Connection", "Connection stalled — retrying automatically...", false);
+            scraperWebView.stopLoading();
+            scraperWebView.setAlpha(0f);
+            scraperWebView.loadUrl(getTimecardPortalUrl());
+            armSyncWatchdog();
+            mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 900);
+            return;
+        }
+        sendFinishToDashboard(
+                false,
+                cookiesValid
+                        ? "Network connection timed out after 45s. Please try Sync again."
+                        : "Session authentication required. Tap Log In to connect.",
+                weeksSyncedCount,
+                !cookiesValid
+        );
+    }
+
     private void sendFinishToDashboard(boolean success, String msg, int weeksSynced, boolean reqLogin) {
         isSyncRunning = false;
+        isInteractiveLoginRequested = false;
+        cancelSyncWatchdog();
         mainHandler.post(() -> {
             String js = String.format(
                     "if(window.TimecardBridge){window.TimecardBridge.finishSync(%b,%s,%d,%b);}",
                     success, JSONObject.quote(msg), weeksSynced, reqLogin
             );
-            dashboardWebView.evaluateJavascript(js, null);
+            if (dashboardWebView != null) {
+                dashboardWebView.evaluateJavascript(js, null);
+            }
 
             // Reclaim resources: suspend scraperWebView background execution when idle
             try {
@@ -802,8 +885,13 @@ public class MainActivity extends Activity {
     private void pollForTimecardWrapper(final int attempt) {
         if (!isSyncRunning) return;
 
-        if (attempt > 180) {
-            sendFinishToDashboard(false, "Timed out waiting for Time Card Viewer.", weeksSyncedCount, true);
+        int maxAttempts = isInteractiveLoginRequested ? 180 : 56;
+        if (attempt > maxAttempts) {
+            if (!isInteractiveLoginRequested) {
+                handleSyncTimeoutOrRetry();
+            } else {
+                sendFinishToDashboard(false, "Timed out waiting for sign-in completion.", weeksSyncedCount, true);
+            }
             return;
         }
 
@@ -1103,7 +1191,7 @@ public class MainActivity extends Activity {
                     try (FileInputStream fis = new FileInputStream(apkFile)) {
                         int b0 = fis.read();
                         int b1 = fis.read();
-                        validApk = (b0 == 'P' && b1 == 'K');
+                        validApk = (b0 == 'P' && b1 == 'K') && verifyFileSha256(apkFile, pendingApkExpectedSha256);
                     } catch (Exception ignored) {}
                 }
 
@@ -1166,6 +1254,28 @@ public class MainActivity extends Activity {
                     null
             );
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        cancelSyncWatchdog();
+        mainHandler.removeCallbacksAndMessages(null);
+        try {
+            if (scraperWebView != null) {
+                scraperWebView.stopLoading();
+                scraperWebView.loadUrl("about:blank");
+                scraperWebView.destroy();
+                scraperWebView = null;
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (dashboardWebView != null) {
+                dashboardWebView.stopLoading();
+                dashboardWebView.destroy();
+                dashboardWebView = null;
+            }
+        } catch (Exception ignored) {}
+        super.onDestroy();
     }
 
     @Override
@@ -1266,6 +1376,8 @@ public class MainActivity extends Activity {
                 isSyncRunning = true;
                 isInteractiveLoginRequested = true;
                 sawSsoLoginPageDuringFlow = false;
+                syncRetryCount = 0;
+                cancelSyncWatchdog();
                 requestedMaxWeeks = 0;
                 requestedSyncTimeoff = true;
                 weeksSyncedCount = 0;
@@ -1286,6 +1398,7 @@ public class MainActivity extends Activity {
                 isSyncRunning = true;
                 isInteractiveLoginRequested = false;
                 sawSsoLoginPageDuringFlow = false;
+                syncRetryCount = 0;
                 requestedMaxWeeks = maxWeeks;
                 requestedSyncTimeoff = syncTimeoff;
                 weeksSyncedCount = 0;
@@ -1300,6 +1413,7 @@ public class MainActivity extends Activity {
                         : "Navigating to Time Card Viewer in background...";
                 sendProgressToDashboard(15, maxWeeks == 1 ? "Refreshing Current Week" : "Connecting", msg, false);
                 scraperWebView.loadUrl("about:blank");
+                armSyncWatchdog();
                 mainHandler.postDelayed(() -> {
                     scraperWebView.loadUrl(getTimecardPortalUrl());
                     mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 1000);

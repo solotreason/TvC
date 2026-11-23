@@ -162,6 +162,35 @@ class TestNewFeatures(unittest.TestCase):
         self.assertTrue(upsert_shift(option_day_wed))
         self.assertFalse(upsert_shift(option_day_wed))
 
+        # "VACATION - EMPLOYEE PREPAID" on Thursday 12/17 (even with total_hours > 0 and punches) -> MUST NOT alert!
+        prepaid_vac_thu = dict(unworked_tue)
+        prepaid_vac_thu["date"] = "2026-12-17"
+        prepaid_vac_thu["day_name"] = "Thu"
+        prepaid_vac_thu["pay_code"] = "VACATION - EMPLOYEE PREPAID"
+        prepaid_vac_thu["start_time_dec"] = 9.00
+        prepaid_vac_thu["start_time_clock"] = "9:00 AM"
+        prepaid_vac_thu["end_time_dec"] = 17.00
+        prepaid_vac_thu["end_time_clock"] = "5:00 PM"
+        prepaid_vac_thu["total_hours"] = 8.00
+        prepaid_vac_thu["gross_pay"] = 375.84
+        vac_audits = []
+        self.assertFalse(upsert_shift(prepaid_vac_thu, new_audits_out=vac_audits))
+        # Even if start/end times on VACATION - EMPLOYEE PREPAID change, it must NOT generate a punch audit alert
+        prepaid_vac_thu_mod = dict(prepaid_vac_thu)
+        prepaid_vac_thu_mod["start_time_dec"] = 9.50
+        prepaid_vac_thu_mod["start_time_clock"] = "9:30 AM"
+        self.assertFalse(upsert_shift(prepaid_vac_thu_mod, new_audits_out=vac_audits))
+        self.assertEqual(len(vac_audits), 0)
+
+        # Punch modification on worked Tuesday 12/15 -> MUST populate new_audits_out
+        tue_audits = []
+        modified_tue = dict(posted_tue)
+        modified_tue["end_time_dec"] = 19.75
+        modified_tue["end_time_clock"] = "7:45 PM"
+        upsert_shift(modified_tue, new_audits_out=tue_audits)
+        self.assertEqual(len(tue_audits), 1)
+        self.assertEqual(tue_audits[0]["field_name"], "End Time")
+
         # Option Day balance decrease in Time Off bank -> should return Option Day usage alert
         initial_entitlements = [
             {"timeoff_type": "OPT", "title": "Option Day", "available_time": 2.0, "time_basis": "Days", "next_earn_date": "Thu 12/31/2026"}
@@ -284,10 +313,15 @@ class TestNewFeatures(unittest.TestCase):
 
         self.assertIn("reloadFromDiskIfUpdated", bridge_src)
         self.assertIn("getNewTimecardsJson", bridge_src)
+        self.assertIn("getNewAuditsJson", bridge_src)
         self.assertIn("getOptionDayAlertsJson", bridge_src)
         self.assertIn("isOptionDayPayCode", bridge_src)
+        self.assertIn("isExcludedAlertPayCode", bridge_src)
+        self.assertIn("VACATION - EMPLOYEE PREPAID", bridge_src)
         self.assertIn("onApkUpdateAvailable", bridge_src)
         self.assertIn("isOptionDayShift", app_js_src)
+        self.assertIn("isExcludedAlertShift", app_js_src)
+        self.assertIn("notifyPunchAuditsDetected", app_js_src)
         self.assertIn("syncFromNativeDiskIfUpdated", app_js_src)
         self.assertIn("refreshDashboardFromStore", app_js_src)
         self.assertIn("triggerNativeApkInstall", app_js_src)
@@ -295,6 +329,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn('id="dismissBatteryOptBtn"', html_src)
         self.assertIn('id="apkUpdateBanner"', html_src)
         self.assertIn('id="otaModalInstallApkBtn"', html_src)
+        self.assertNotIn("Permanent Vault Active", html_src)
         self.assertIn("REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", manifest_src)
         self.assertIn("REQUEST_INSTALL_PACKAGES", manifest_src)
         self.assertIn("com.timecard.tracker.apkprovider", manifest_src)
@@ -302,6 +337,8 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("downloadAndInstallApk", main_src)
         self.assertIn("cleanupStaleOtaIfFactoryNewer", main_src)
         self.assertIn("application/vnd.android.package-archive", provider_src)
+        self.assertIn("isExcludedAlertShift", job_src)
+        self.assertIn("VACATION - EMPLOYEE PREPAID", job_src)
 
     @classmethod
     def tearDownClass(cls):

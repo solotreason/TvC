@@ -330,7 +330,24 @@
     return { profile, entitlements };
   }
 
+  function isExcludedAlertPayCode(payCode, details) {
+    const raw = (payCode || '').trim().toUpperCase();
+    if (raw.includes('VACATION - EMPLOYEE PREPAID') || (raw.includes('VACATION') && raw.includes('PREPAID'))) {
+      return true;
+    }
+    if (Array.isArray(details)) {
+      for (const det of details) {
+        const t = `${(det && det.trans_type) || ''} ${(det && det.activity) || ''}`.trim().toUpperCase();
+        if (t.includes('VACATION - EMPLOYEE PREPAID') || (t.includes('VACATION') && t.includes('PREPAID'))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   function isOptionDayPayCode(payCode, details) {
+    if (isExcludedAlertPayCode(payCode, details)) return false;
     const raw = (payCode || '').trim().toUpperCase();
     if (
       raw.includes('OPTION') ||
@@ -365,6 +382,7 @@
 
   function isShiftCompleted(s) {
     if (!s) return false;
+    if (isExcludedAlertPayCode(s.pay_code, s.details)) return false;
     return (
       s.start_time_dec !== null &&
       s.start_time_dec !== undefined &&
@@ -412,11 +430,12 @@
       const existing = prevShiftMap.get(newShift.date);
       const shiftAudits = existing && Array.isArray(existing.audit_history) ? [...existing.audit_history] : [];
 
+      const isExcludedNow = isExcludedAlertPayCode(newShift.pay_code, newShift.details);
       const wasCompleteOrOpt = isShiftCompleted(existing) || (
         !!existing && isOptionDayPayCode(existing.pay_code, existing.details)
       );
-      const isOptionDayNow = isOptionDayPayCode(newShift.pay_code, newShift.details);
-      const isCompleteOrOptNow = isShiftCompleted(newShift) || isOptionDayNow;
+      const isOptionDayNow = !isExcludedNow && isOptionDayPayCode(newShift.pay_code, newShift.details);
+      const isCompleteOrOptNow = !isExcludedNow && (isShiftCompleted(newShift) || isOptionDayNow);
 
       if (weekAlreadyHadShifts && !wasCompleteOrOpt && isCompleteOrOptNow) {
         if (!Array.isArray(syncState.new_timecards)) syncState.new_timecards = [];
@@ -433,7 +452,8 @@
         });
       }
 
-      if (existing) {
+      if (existing && !isExcludedNow) {
+        if (!Array.isArray(syncState.new_audits)) syncState.new_audits = [];
         // Check 1: Start Time
         const oldStart = existing.start_time_dec;
         const newStart = newShift.start_time_dec;
@@ -454,6 +474,7 @@
             };
             db.audit_logs.unshift(entry);
             shiftAudits.unshift(entry);
+            syncState.new_audits.push(entry);
           }
         }
 
@@ -477,6 +498,7 @@
             };
             db.audit_logs.unshift(entry);
             shiftAudits.unshift(entry);
+            syncState.new_audits.push(entry);
           }
         }
 
@@ -498,6 +520,7 @@
             };
             db.audit_logs.unshift(entry);
             shiftAudits.unshift(entry);
+            syncState.new_audits.push(entry);
           }
         }
       }
@@ -684,6 +707,9 @@
     },
     getNewTimecardsJson: function () {
       return JSON.stringify(syncState.new_timecards || []);
+    },
+    getNewAuditsJson: function () {
+      return JSON.stringify(syncState.new_audits || []);
     },
     getOptionDayAlertsJson: function () {
       return JSON.stringify(syncState.option_day_alerts || []);
@@ -1015,6 +1041,7 @@
       syncState.sync_in_progress = true;
       syncState.percent = 5;
       syncState.new_timecards = [];
+      syncState.new_audits = [];
       syncState.option_day_alerts = [];
       syncState.stage = maxWeeks === 1 ? 'Refreshing Current Week' : 'Starting';
       syncState.message = maxWeeks === 1
@@ -1046,6 +1073,7 @@
         message: syncState.message,
         requires_login: syncState.requires_login,
         new_timecards: syncState.new_timecards || [],
+        new_audits: syncState.new_audits || [],
         option_day_alerts: syncState.option_day_alerts || [],
         latest_log: syncState.latest_log || db.latest_log
       });

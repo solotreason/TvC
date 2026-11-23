@@ -411,10 +411,12 @@ def run_timecard_sync(
             # Parse initial week
             initial_html = page.content()
             initial_parsed = parse_timecard_html(initial_html)
+            new_audits = []
+            option_day_alerts = []
 
             week_summary = initial_parsed["week_summary"]
             if week_summary["week_end_date"] != "unknown":
-                new_timecards.extend(save_parsed_week(initial_parsed))
+                new_timecards.extend(save_parsed_week(initial_parsed, new_audits_out=new_audits))
                 weeks_synced += 1
                 synced_summaries.append(week_summary)
 
@@ -449,7 +451,7 @@ def run_timecard_sync(
 
                     week_html = page.content()
                     parsed = parse_timecard_html(week_html, selected_week_end=week_date)
-                    new_timecards.extend(save_parsed_week(parsed))
+                    new_timecards.extend(save_parsed_week(parsed, new_audits_out=new_audits))
 
                     weeks_synced += 1
                     synced_summaries.append(parsed["week_summary"])
@@ -468,7 +470,7 @@ def run_timecard_sync(
                         pass
                     timeoff_html = page.content()
                     timeoff_data = parse_timeoff_html(timeoff_html)
-                    upsert_entitlements(timeoff_data["entitlements"], profile=timeoff_data.get("profile"))
+                    option_day_alerts = upsert_entitlements(timeoff_data["entitlements"], profile=timeoff_data.get("profile")) or []
                     print(f"Time Off Viewer synced: {len(timeoff_data['entitlements'])} entitlements.")
                 except Exception as ex:
                     print(f"Warning: Failed to sync Time Off Viewer: {ex}")
@@ -490,7 +492,9 @@ def run_timecard_sync(
                 "success": True,
                 "weeks_synced": weeks_synced,
                 "summaries": synced_summaries,
-                "new_timecards": new_timecards
+                "new_timecards": new_timecards,
+                "new_audits": new_audits,
+                "option_day_alerts": option_day_alerts
             }
 
         except Exception as e:

@@ -787,6 +787,9 @@ public class TimecardSyncJobService extends JobService {
             for (Map.Entry<String, JSONObject> entry : candidateShifts.entrySet()) {
                 String date = entry.getKey();
                 JSONObject s = entry.getValue();
+                if (isExcludedAlertShift(s)) {
+                    continue;
+                }
                 if (isOptionDayShift(s)) {
                     String optStageKey = date + "|option_day";
                     if (!notifiedSet.contains(optStageKey)) {
@@ -794,7 +797,7 @@ public class TimecardSyncJobService extends JobService {
                         freshOptionDayAlerts.add(s);
                     }
                 } else if (isShiftComplete(s)) {
-                    // Only notify when shift is COMPLETED (never on clock-in-only open punch)
+                    // Only notify when shift is COMPLETED (never on clock-in-only open punch or VACATION - EMPLOYEE PREPAID)
                     String compStageKey = date + "|complete";
                     if (!notifiedSet.contains(compStageKey)) {
                         notifiedSet.add(compStageKey);
@@ -1030,8 +1033,30 @@ public class TimecardSyncJobService extends JobService {
         return map;
     }
 
-    private static boolean isOptionDayShift(JSONObject shift) {
+    private static boolean isExcludedAlertShift(JSONObject shift) {
         if (shift == null) return false;
+        String raw = shift.optString("pay_code", "").trim().toUpperCase(Locale.US);
+        if (raw.contains("VACATION - EMPLOYEE PREPAID") || (raw.contains("VACATION") && raw.contains("PREPAID"))) {
+            return true;
+        }
+        JSONArray details = shift.optJSONArray("details");
+        if (details != null) {
+            for (int i = 0; i < details.length(); i++) {
+                JSONObject det = details.optJSONObject(i);
+                if (det == null) continue;
+                String t = (det.optString("trans_type", "") + " " + det.optString("activity", ""))
+                        .trim()
+                        .toUpperCase(Locale.US);
+                if (t.contains("VACATION - EMPLOYEE PREPAID") || (t.contains("VACATION") && t.contains("PREPAID"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isOptionDayShift(JSONObject shift) {
+        if (shift == null || isExcludedAlertShift(shift)) return false;
         if (shift.optBoolean("is_option_day", false)) return true;
         String raw = shift.optString("pay_code", "").trim().toUpperCase(Locale.US);
         if (raw.contains("OPTION")
@@ -1067,7 +1092,7 @@ public class TimecardSyncJobService extends JobService {
     }
 
     private static boolean isShiftComplete(JSONObject shift) {
-        if (shift == null) return false;
+        if (shift == null || isExcludedAlertShift(shift)) return false;
         return shift.optDouble("total_hours", 0.0) > 0.005
                 && !shift.optString("end_time_clock", "").isEmpty();
     }
@@ -1082,6 +1107,7 @@ public class TimecardSyncJobService extends JobService {
             String payCode = todayShift.optString("pay_code", "").trim().toUpperCase(Locale.US);
             return isShiftComplete(todayShift)
                     || isOptionDayShift(todayShift)
+                    || isExcludedAlertShift(todayShift)
                     || payCode.contains("SCHEDULED OFF");
         } catch (Exception ignored) {}
         return false;

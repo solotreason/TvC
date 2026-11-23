@@ -21,8 +21,25 @@ function getLocalIsoDate(offsetDays = 0) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function isOptionDayShift(s) {
+function isExcludedAlertShift(s) {
   if (!s) return false;
+  const raw = String(s.pay_code || '').trim().toUpperCase();
+  if (raw.includes('VACATION - EMPLOYEE PREPAID') || (raw.includes('VACATION') && raw.includes('PREPAID'))) {
+    return true;
+  }
+  if (Array.isArray(s.details)) {
+    for (const det of s.details) {
+      const t = `${(det && det.trans_type) || ''} ${(det && det.activity) || ''}`.trim().toUpperCase();
+      if (t.includes('VACATION - EMPLOYEE PREPAID') || (t.includes('VACATION') && t.includes('PREPAID'))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isOptionDayShift(s) {
+  if (!s || isExcludedAlertShift(s)) return false;
   if (s.is_option_day) return true;
   const raw = String(s.pay_code || '').trim().toUpperCase();
   if (
@@ -57,7 +74,7 @@ function isOptionDayShift(s) {
 }
 
 function isCompletedWorkedShift(s) {
-  if (!s) return false;
+  if (!s || isExcludedAlertShift(s)) return false;
   const hasStart = (s.start_time_dec !== null && s.start_time_dec !== undefined) || !!s.start_time_clock;
   const hasEnd = (s.end_time_dec !== null && s.end_time_dec !== undefined) || !!s.end_time_clock;
   return hasStart && hasEnd && (Number(s.total_hours) || 0) > 0.005;
@@ -86,6 +103,7 @@ function isWaitingForDailyTimecard() {
     todayShift && (
       isCompletedWorkedShift(todayShift) ||
       isOptionDayShift(todayShift) ||
+      isExcludedAlertShift(todayShift) ||
       rawPayCode.includes('SCHEDULED OFF')
     )
   );
@@ -416,6 +434,7 @@ async function loadWeeks(preferredWeek = null) {
 const weekDetailsCache = new Map();
 const knownWorkedDaysByWeek = new Map(); // Tracks known active shift dates per week to detect newly posted daily timecards
 const notifiedShiftDates = new Set();
+const notifiedAuditSignatures = new Set();
 
 function requestBrowserNotificationPermission() {
   try {
@@ -475,9 +494,9 @@ window.focusShiftFromNotification = async function (weekEndDate, shiftDate) {
 function notifyDailyTimecardAdded(newTimecards, fallbackWeekEndDate = '') {
   if (!Array.isArray(newTimecards) || newTimecards.length === 0) return;
 
-  // Notify strictly on completed shifts or Option Day usage (never on clock-in-only open punches)
+  // Notify strictly on completed shifts or Option Day usage (never on clock-in-only open punches or VACATION - EMPLOYEE PREPAID)
   const freshItems = newTimecards.filter(
-    tc => tc && tc.date && !notifiedShiftDates.has(tc.date) && (isCompletedWorkedShift(tc) || isOptionDayShift(tc))
+    tc => tc && tc.date && !isExcludedAlertShift(tc) && !notifiedShiftDates.has(tc.date) && (isCompletedWorkedShift(tc) || isOptionDayShift(tc))
   );
   if (freshItems.length === 0) return;
 
@@ -525,6 +544,56 @@ function notifyDailyTimecardAdded(newTimecards, fallbackWeekEndDate = '') {
   } catch (e) {}
 
   // 3. Desktop / Web Browser OS Notification (with click deep-link)
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const n = new Notification(title, { body: body });
+      n.onclick = () => {
+        try { window.focus(); } catch (e) {}
+        window.focusShiftFromNotification(targetWeekEnd, targetShiftDate);
+      };
+    }
+  } catch (e) {}
+}
+
+function notifyPunchAuditsDetected(newAudits, fallbackWeekEndDate = '') {
+  if (!Array.isArray(newAudits) || newAudits.length === 0) return;
+
+  const freshAudits = newAudits.filter(a => {
+    if (!a || !a.date || !a.field_name) return false;
+    const sig = `${a.week_end_date || ''}|${a.date}|${a.field_name}|${a.old_value || ''}|${a.new_value || ''}`;
+    if (notifiedAuditSignatures.has(sig)) return false;
+    notifiedAuditSignatures.add(sig);
+    return true;
+  });
+  if (freshAudits.length === 0) return;
+
+  const latest = freshAudits[freshAudits.length - 1];
+  const targetWeekEnd = latest.week_end_date || fallbackWeekEndDate || (currentWeekData ? currentWeekData.week_end_date : '');
+  const targetShiftDate = latest.date || '';
+  latestNotifiedTarget = { weekEndDate: targetWeekEnd, shiftDate: targetShiftDate };
+
+  const title = freshAudits.length === 1
+    ? `Punch Modification Detected (${latest.date})`
+    : `${freshAudits.length} Punch Modifications Detected`;
+  const body = freshAudits
+    .map(a => `${a.date} ${a.field_name}: ${a.old_value || ''} → ${a.new_value || ''}`)
+    .join(' | ');
+
+  const toast = document.getElementById('newTimecardToast');
+  const toastTitle = document.getElementById('newTimecardToastTitle');
+  const toastBody = document.getElementById('newTimecardToastBody');
+  if (toast && toastTitle && toastBody) {
+    toastTitle.textContent = title;
+    toastBody.textContent = body;
+    toast.classList.remove('hidden');
+  }
+
+  try {
+    if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.showTimecardNotificationForShift) {
+      window.AndroidNative.showTimecardNotificationForShift(title, body, targetWeekEnd, targetShiftDate);
+    }
+  } catch (e) {}
+
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
       const n = new Notification(title, { body: body });
@@ -1297,6 +1366,9 @@ async function checkSyncStatus() {
       if (Array.isArray(data.new_timecards) && data.new_timecards.length > 0) {
         notifyDailyTimecardAdded(data.new_timecards);
       }
+      if (Array.isArray(data.new_audits) && data.new_audits.length > 0) {
+        notifyPunchAuditsDetected(data.new_audits);
+      }
       if (!hasDailyOptAlert && Array.isArray(data.option_day_alerts) && data.option_day_alerts.length > 0) {
         const optAlert = data.option_day_alerts[0];
         const optTitle = `${optAlert.title || 'Option Day'} Used`;
@@ -1312,6 +1384,11 @@ async function checkSyncStatus() {
         try {
           if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.showTimecardNotificationForShift) {
             window.AndroidNative.showTimecardNotificationForShift(optTitle, optBody, '', '');
+          }
+        } catch (e) {}
+        try {
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification(optTitle, { body: optBody });
           }
         } catch (e) {}
       }

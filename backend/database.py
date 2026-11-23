@@ -160,8 +160,23 @@ def upsert_week(week_data: Dict[str, Any]):
     conn.close()
 
 
+def is_excluded_alert_pay_code(pay_code: Optional[str], details: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """Returns True for pay codes that must never trigger alerts (e.g., VACATION - EMPLOYEE PREPAID)."""
+    raw = (pay_code or "").strip().upper()
+    if "VACATION - EMPLOYEE PREPAID" in raw or ("VACATION" in raw and "PREPAID" in raw):
+        return True
+    if details:
+        for det in details:
+            t = f"{det.get('trans_type', '')} {det.get('activity', '')}".strip().upper()
+            if "VACATION - EMPLOYEE PREPAID" in t or ("VACATION" in t and "PREPAID" in t):
+                return True
+    return False
+
+
 def is_option_day_pay_code(pay_code: Optional[str], details: Optional[List[Dict[str, Any]]] = None) -> bool:
     """Returns True if the shift pay_code or detail rows indicate an Option Day or Option Week."""
+    if is_excluded_alert_pay_code(pay_code, details):
+        return False
     raw = (pay_code or "").strip().upper()
     if any(tok in raw for tok in ("OPTION", "OPT DAY", "OPTDAY", "OPT WK", "OPT WEEK")) or raw in ("OPT", "OPW") or raw.startswith("OPT "):
         return True
@@ -174,8 +189,10 @@ def is_option_day_pay_code(pay_code: Optional[str], details: Optional[List[Dict[
 
 
 def is_shift_completed(shift_row: Optional[Dict[str, Any]]) -> bool:
-    """Returns True when a worked shift has both start & end punches and total_hours > 0."""
+    """Returns True when a worked shift has both start & end punches and total_hours > 0 (excluding prepaid vacation)."""
     if not shift_row:
+        return False
+    if is_excluded_alert_pay_code(shift_row.get("pay_code"), shift_row.get("details")):
         return False
     return (
         shift_row.get("start_time_dec") is not None
@@ -184,7 +201,7 @@ def is_shift_completed(shift_row: Optional[Dict[str, Any]]) -> bool:
     )
 
 
-def upsert_shift(shift_data: Dict[str, Any]) -> bool:
+def upsert_shift(shift_data: Dict[str, Any], new_audits_out: Optional[List[Dict[str, Any]]] = None) -> bool:
     """
     Insert or update daily shift record.
     Audits ONLY punch changes: Start Time, End Time, and Meal/Unpaid.
@@ -193,6 +210,7 @@ def upsert_shift(shift_data: Dict[str, Any]) -> bool:
     """
     conn = get_connection()
     is_newly_added_timecard = False
+    is_excluded = is_excluded_alert_pay_code(shift_data.get("pay_code"), shift_data.get("details"))
     with conn:
         week_shift_count = conn.execute(
             "SELECT COUNT(*) FROM shifts WHERE week_end_date = ?",
@@ -208,13 +226,15 @@ def upsert_shift(shift_data: Dict[str, Any]) -> bool:
         was_complete_or_opt = is_shift_completed(existing_dict) or (
             existing_dict is not None and is_option_day_pay_code(existing_dict.get("pay_code"))
         )
-        is_complete_or_opt_now = is_shift_completed(shift_data) or is_option_day_pay_code(
-            shift_data.get("pay_code"), shift_data.get("details")
+        is_complete_or_opt_now = (not is_excluded) and (
+            is_shift_completed(shift_data) or is_option_day_pay_code(
+                shift_data.get("pay_code"), shift_data.get("details")
+            )
         )
         if week_shift_count > 0 and (not was_complete_or_opt) and is_complete_or_opt_now:
             is_newly_added_timecard = True
 
-        if existing:
+        if existing and not is_excluded:
             # 1. Start Time check
             old_start_dec = existing["start_time_dec"]
             new_start_dec = shift_data.get("start_time_dec")
@@ -223,16 +243,27 @@ def upsert_shift(shift_data: Dict[str, Any]) -> bool:
                     old_clock = existing["start_time_clock"] or f"{old_start_dec:.2f}"
                     new_clock = shift_data.get("start_time_clock") or f"{new_start_dec:.2f}"
                     diff_mins = round((new_start_dec - old_start_dec) * 60)
+                    old_val_str = f"{old_clock} ({old_start_dec:.2f})"
+                    new_val_str = f"{new_clock} ({new_start_dec:.2f})"
                     conn.execute("""
                         INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
                         VALUES (?, ?, 'Start Time', ?, ?, ?)
                     """, (
                         shift_data["week_end_date"],
                         shift_data["date"],
-                        f"{old_clock} ({old_start_dec:.2f})",
-                        f"{new_clock} ({new_start_dec:.2f})",
+                        old_val_str,
+                        new_val_str,
                         diff_mins
                     ))
+                    if new_audits_out is not None:
+                        new_audits_out.append({
+                            "week_end_date": shift_data["week_end_date"],
+                            "date": shift_data["date"],
+                            "field_name": "Start Time",
+                            "old_value": old_val_str,
+                            "new_value": new_val_str,
+                            "diff_num": diff_mins
+                        })
 
             # 2. End Time check
             old_end_dec = existing["end_time_dec"]
@@ -242,32 +273,54 @@ def upsert_shift(shift_data: Dict[str, Any]) -> bool:
                     old_clock = existing["end_time_clock"] or f"{old_end_dec:.2f}"
                     new_clock = shift_data.get("end_time_clock") or f"{new_end_dec:.2f}"
                     diff_mins = round((new_end_dec - old_end_dec) * 60)
+                    old_val_str = f"{old_clock} ({old_end_dec:.2f})"
+                    new_val_str = f"{new_clock} ({new_end_dec:.2f})"
                     conn.execute("""
                         INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
                         VALUES (?, ?, 'End Time', ?, ?, ?)
                     """, (
                         shift_data["week_end_date"],
                         shift_data["date"],
-                        f"{old_clock} ({old_end_dec:.2f})",
-                        f"{new_clock} ({new_end_dec:.2f})",
+                        old_val_str,
+                        new_val_str,
                         diff_mins
                     ))
+                    if new_audits_out is not None:
+                        new_audits_out.append({
+                            "week_end_date": shift_data["week_end_date"],
+                            "date": shift_data["date"],
+                            "field_name": "End Time",
+                            "old_value": old_val_str,
+                            "new_value": new_val_str,
+                            "diff_num": diff_mins
+                        })
 
             # 3. Meal / Unpaid check (only when both old and new records are active punch cards)
             old_meal = existing["meal_unpaid_hours"] or 0.0
             new_meal = shift_data.get("meal_unpaid_hours") or 0.0
             if old_start_dec is not None and new_start_dec is not None and abs(old_meal - new_meal) > 0.005:
                 diff_mins = round((new_meal - old_meal) * 60)
+                old_val_str = f"{old_meal:.2f}h ({round(old_meal*60)}m)"
+                new_val_str = f"{new_meal:.2f}h ({round(new_meal*60)}m)"
                 conn.execute("""
                     INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
                     VALUES (?, ?, 'Meal/Unpaid', ?, ?, ?)
                 """, (
                     shift_data["week_end_date"],
                     shift_data["date"],
-                    f"{old_meal:.2f}h ({round(old_meal*60)}m)",
-                    f"{new_meal:.2f}h ({round(new_meal*60)}m)",
+                    old_val_str,
+                    new_val_str,
                     diff_mins
                 ))
+                if new_audits_out is not None:
+                    new_audits_out.append({
+                        "week_end_date": shift_data["week_end_date"],
+                        "date": shift_data["date"],
+                        "field_name": "Meal/Unpaid",
+                        "old_value": old_val_str,
+                        "new_value": new_val_str,
+                        "diff_num": diff_mins
+                    })
 
         conn.execute("""
             INSERT INTO shifts (
@@ -319,7 +372,10 @@ def replace_shift_details(shift_date: str, details_list: List[Dict[str, Any]]):
     conn.close()
 
 
-def save_parsed_week(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+def save_parsed_week(
+    parsed: Dict[str, Any],
+    new_audits_out: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
     """
     Persists a parsed week summary, its shifts, shift details, and corrections.
     Returns any newly detected daily timecard shifts for notifications.
@@ -332,7 +388,7 @@ def save_parsed_week(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     upsert_week(week_summary)
     for shift in parsed.get("shifts", []):
-        if upsert_shift(shift):
+        if upsert_shift(shift, new_audits_out=new_audits_out):
             new_timecards.append({
                 "week_end_date": shift.get("week_end_date") or week_end_date,
                 "date": shift.get("date"),

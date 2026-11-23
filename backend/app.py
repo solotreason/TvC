@@ -335,6 +335,8 @@ def sync_status():
         "message": sync_state.get("message", ""),
         "requires_login": sync_state.get("requires_login", False),
         "new_timecards": sync_state.get("new_timecards", []),
+        "new_audits": sync_state.get("new_audits", []),
+        "option_day_alerts": sync_state.get("option_day_alerts", []),
         "latest_log": latest
     }
 
@@ -344,6 +346,8 @@ def _execute_sync(max_weeks: int, headless: bool, sync_timeoff: bool):
     with sync_lock:
         sync_in_progress = True
         sync_state["new_timecards"] = []
+        sync_state["new_audits"] = []
+        sync_state["option_day_alerts"] = []
         update_sync_progress(5, "Starting", "Initializing background sync engine...")
         try:
             res = run_timecard_sync(
@@ -352,8 +356,13 @@ def _execute_sync(max_weeks: int, headless: bool, sync_timeoff: bool):
                 sync_timeoff=sync_timeoff,
                 progress_callback=update_sync_progress
             )
-            if isinstance(res, dict) and res.get("new_timecards"):
-                sync_state["new_timecards"] = res["new_timecards"]
+            if isinstance(res, dict):
+                if res.get("new_timecards"):
+                    sync_state["new_timecards"] = res["new_timecards"]
+                if res.get("new_audits"):
+                    sync_state["new_audits"] = res["new_audits"]
+                if res.get("option_day_alerts"):
+                    sync_state["option_day_alerts"] = res["option_day_alerts"]
         except Exception as e:
             update_sync_progress(0, "Error", str(e), False)
         finally:

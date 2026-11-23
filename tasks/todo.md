@@ -2,7 +2,24 @@
 
 ## Status & Phases
 
-### Current Sprint: UI Polish, Android Pull-Down Refresh & Conditional APK Update Button (v2.4.8)
+### Current Sprint: Complete Alerts (Timecards, Punch Audits & Option Days), Exclude Prepaid Vacation & Clean Archive Header (v2.4.9)
+
+- [x] 1. **Alerts for Timecard Added, Punch Audits & Option Days (`backend/database.py`, `backend/scraper.py`, `backend/app.py`, `static/android_bridge.js`, `static/app.js`, `TimecardSyncJobService.java`)**:
+  - Tracked newly detected punch modifications (`new_audits` for Start Time, End Time, Meal/Unpaid) alongside `new_timecards` and `option_day_alerts` in `backend/database.py`, `backend/scraper.py`, `backend/app.py`, and `static/android_bridge.js` (`getNewAuditsJson`).
+  - Added `notifyPunchAuditsDetected` in `static/app.js` and wired `checkSyncStatus()` so in-app banners, native Android notifications, and browser notifications fire for all three events: (1) completed daily timecards added, (2) punch modification audits, and (3) Option Days used (daily row or Time Off bank decrease).
+
+- [x] 2. **Suppress All Alerts for `"VACATION - EMPLOYEE PREPAID"` (`backend/database.py`, `static/android_bridge.js`, `static/app.js`, `TimecardSyncJobService.java`)**:
+  - Added `is_excluded_alert_pay_code` / `isExcludedAlertPayCode` / `isExcludedAlertShift` across Python, JS, and Android Java to strictly exclude `"VACATION - EMPLOYEE PREPAID"` (and prepaid vacation detail segments) from triggering timecard, Option Day, or punch audit alerts.
+  - Treated `"VACATION - EMPLOYEE PREPAID"` as a settled day in `isWaitingForDailyTimecard` and `isTodayShiftCompletedInStore` so background sync throttles to quiet intervals on vacation days.
+
+- [x] 3. **Remove `'Permanent Vault Active'` Badge Next to `'Historical Timecard Archive'` (`static/index.html`)**:
+  - Removed `#archiveVaultBadge` (`Permanent Vault Active`) next to `Historical Timecard Archive` in `static/index.html` while maintaining the permanent local & MongoDB cloud archive vault feature.
+
+- [x] 4. **Verify, Package OTA + APK, Push & Purge CDN (v2.4.9)**:
+  - Added unit test assertions in `tests/test_features.py` for `"VACATION - EMPLOYEE PREPAID"` alert suppression and punch audit / Option Day alert generation.
+  - Ran `python -m unittest discover tests -v`, `python run.py --pack-ota --ver 2.4.9`, pushed to `origin/main`, and purged jsDelivr CDN cache.
+
+### Completed Sprint: UI Polish, Android Pull-Down Refresh & Conditional APK Update Button (v2.4.8)
 
 - [x] 1. **Remove 'Permanent Vault Active' from Footer (Keep Feature Active) (`static/index.html`)**:
   - Removed the `Permanent Vault Active` badge and extra separator from the footer while keeping the permanent vault feature and Archive tab intact.

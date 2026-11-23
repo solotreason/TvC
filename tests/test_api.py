@@ -155,8 +155,8 @@ class TestAppEndpoints(unittest.TestCase):
         self.assertIn("authLabel", response.text)
         self.assertNotIn("logoutBtn", response.text)
 
-        # Verify Sync (Current Week Only) button and removal of pull-to-refresh
-        self.assertNotIn("pullRefreshContainer", response.text)
+        # Verify Pull-Down Refresh & Sync (Current Week Only) elements
+        self.assertIn("pullRefreshContainer", response.text)
         self.assertIn("<span>Sync</span>", response.text)
         self.assertNotIn("Sync All", response.text)
         self.assertNotIn("refreshCurrentWeekBtn", response.text)

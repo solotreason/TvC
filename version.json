@@ -1,12 +1,12 @@
 {
   "version": "2.5.1",
-  "build": 2026112205,
+  "build": 2026112206,
   "min_apk_version": 1,
   "release_notes": "Performance & stability hardening: 45s sync watchdog + auto-retry, smart tab-aware Sync, hot-store auto-pruning, and SHA-256 update integrity",
   "github_repo": "solotreason/TvC",
   "ota_bundle_url": "https://raw.githubusercontent.com/solotreason/TvC/main/static/ota_bundle.zip",
   "apk_url": "https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk",
-  "apk_build": 2026112205,
-  "ota_sha256": "f264f06f6c8193e99fadef46affadb545d2385579ec673cefc7711c557a560f3",
-  "apk_sha256": "454f26e4d3055b9949cab12e062094157e3462e9ba615f4a5b90f1f01014a2a7"
+  "apk_build": 2026112206,
+  "ota_sha256": "a6b2212d54c2ba6929d6b07cddfad4f34325f6b14f5b1add2bb19d3c33ccad44",
+  "apk_sha256": "cf1fcef23e570bd5e55a2a93d9d16325e459f9086f2d0d13ec95aaf55ef03be7"
 }

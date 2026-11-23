@@ -15,9 +15,12 @@
 - [x] 3. **Remove `'Permanent Vault Active'` Badge Next to `'Historical Timecard Archive'` (`static/index.html`)**:
   - Removed `#archiveVaultBadge` (`Permanent Vault Active`) next to `Historical Timecard Archive` in `static/index.html` while maintaining the permanent local & MongoDB cloud archive vault feature.
 
-- [x] 4. **Verify, Package OTA + APK, Push & Purge CDN (v2.4.9)**:
-  - Added unit test assertions in `tests/test_features.py` for `"VACATION - EMPLOYEE PREPAID"` alert suppression and punch audit / Option Day alert generation.
-  - Ran `python -m unittest discover tests -v`, `python run.py --pack-ota --ver 2.4.9`, pushed to `origin/main`, and purged jsDelivr CDN cache.
+- [x] 4. **Prevent Portal Background from Showing During Login (`MainActivity.java`, `backend/scraper.py`)**:
+  - Added 3-layer portal surface cloaking (`isPortalHostUrl`, `cloakPortalSurfaceInScraper`, `scraperWebView.setAlpha(0f)`, DOM `opacity: 0`, and instant `WRAPPER_LOADING` dismissal) so `loginOverlayContainer` is only visible while on the external SSO / 2FA login host and hides the exact millisecond 2FA redirects back to the portal.
+
+- [x] 5. **Verify, Package OTA + APK, Push & Purge CDN (v2.5.0)**:
+  - Added unit test assertions in `tests/test_features.py` for `"VACATION - EMPLOYEE PREPAID"` alert suppression, punch audit / Option Day alert generation, and portal login surface cloaking (`cloakPortalSurfaceInScraper`).
+  - Ran `python -m unittest discover tests -v` (20/20 passed), `python run.py --pack-ota --ver 2.5.0`, pushed to `origin/main`, and purged jsDelivr CDN cache.
 
 ### Completed Sprint: UI Polish, Android Pull-Down Refresh & Conditional APK Update Button (v2.4.8)
 

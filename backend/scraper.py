@@ -211,6 +211,17 @@ def launch_login_flow(timeout_seconds: int = 180) -> Dict[str, Any]:
                 args=["--disable-blink-features=AutomationControlled"]
             )
             page = context.pages[0] if context.pages else context.new_page()
+            # Cloak destination portal UI so only the SSO sign-in / 2FA screen is ever visible during login
+            page.add_init_script("""
+                (function() {
+                    var href = (window.location.href || '').toLowerCase();
+                    if (href.indexOf('time-card-viewer') !== -1 || href.indexOf('time-off-viewer') !== -1 || href.indexOf('/tools-and-resources/pay-and-benefits/') !== -1) {
+                        var s = document.createElement('style');
+                        s.textContent = 'html, body { opacity: 0 !important; background: #1e293b !important; pointer-events: none !important; }';
+                        (document.head || document.documentElement).appendChild(s);
+                    }
+                })();
+            """)
             page.goto(TIMECARD_PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
             
             # Wait for user to complete login/2FA with active Microsoft prompt auto-bypass

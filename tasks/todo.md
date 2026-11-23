@@ -2,25 +2,7 @@
 
 ## Status & Phases
 
-### Current Sprint: Performance, Stability, Storage Auto-Pruning & SHA-256 Update Integrity (v2.5.1)
-
-- [x] 1. **Instant Startup & WebView Cache Hygiene (`MainActivity.java`, `PortalHelper.java`)**:
-  - Switched `dashboardWebView` from `LOAD_NO_CACHE` to `LOAD_DEFAULT` while stamping `Cache-Control: no-store` on local `appassets.local` responses in `PortalHelper.loadAppAssetResponse`, so local OTA/APK files are always fresh while external CDN fonts/icons cache on disk for 0-network instant launch.
-
-- [x] 2. **45s Sync Watchdog, 1 Auto-Retry & `onDestroy()` Lifecycle Cleanup (`MainActivity.java`)**:
-  - Added a 45-second hard sync timeout watchdog (`SYNC_WATCHDOG_TIMEOUT_MS = 45000L`) with 1 automatic silent retry (`syncRetryCount < 1`) when a background/manual sync stalls on a bad cell connection, only prompting for login if SSO cookies are actually expired.
-  - Added `onDestroy()` cleanup in `MainActivity.java` to cancel pending handler callbacks and cleanly tear down `scraperWebView` and `dashboardWebView`.
-
-- [x] 3. **Smart Tab-Aware Sync & Hot-Store Auto-Pruning (`static/app.js`, `static/android_bridge.js`, `TimecardSyncJobService.java`)**:
-  - Updated `#syncBtn` in `static/app.js` to run fast current-week-only sync on the Time Card tab, while automatically including the Time Off Entitlement Bank when the Time Off tab (`#viewTimeOff`) is active or when Time Off hasn't been synced in >30 minutes.
-  - Auto-pruned active hot store (`timecard_store_v4.json`) in `static/android_bridge.js` after vaulting to the permanent archive (`timecard_archive_v1.json`) so active JSON reads/writes stay `< 50 KB` forever.
-  - Capped `PREF_NOTIFIED_SIGNATURES` in `TimecardSyncJobService.java` at 400 entries to prevent `SharedPreferences` bloat.
-
-- [x] 4. **SHA-256 Cryptographic Verification for OTA & APK Updates + Edge-Case HTML Snapshot Tests (`run.py`, `MainActivity.java`, `tests/test_parser.py`, `tests/test_features.py`)**:
-  - Added `ota_sha256` and `apk_sha256` generation in `run.py --pack-ota` and `verifyFileSha256` enforcement in `MainActivity.java` before applying OTA bundles or launching the APK installer.
-  - Added edge-case HTML parser snapshot tests in `tests/test_parser.py` for Option Day rows, `"VACATION - EMPLOYEE PREPAID"` rows, and clock-in-only active shifts.
-
-### Completed Sprint: Complete Alerts (Timecards, Punch Audits & Option Days), Exclude Prepaid Vacation & Clean Archive Header (v2.4.9 / v2.5.0)
+### Current Sprint: Complete Alerts (Timecards, Punch Audits & Option Days), Exclude Prepaid Vacation & Clean Archive Header (v2.4.9)
 
 - [x] 1. **Alerts for Timecard Added, Punch Audits & Option Days (`backend/database.py`, `backend/scraper.py`, `backend/app.py`, `static/android_bridge.js`, `static/app.js`, `TimecardSyncJobService.java`)**:
   - Tracked newly detected punch modifications (`new_audits` for Start Time, End Time, Meal/Unpaid) alongside `new_timecards` and `option_day_alerts` in `backend/database.py`, `backend/scraper.py`, `backend/app.py`, and `static/android_bridge.js` (`getNewAuditsJson`).

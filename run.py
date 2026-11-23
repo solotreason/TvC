@@ -112,20 +112,6 @@ def build_android_apk():
         print(f"\nSUCCESS! Standalone Android APK built at:\n  {dest_apk} ({size_mb:.2f} MB)")
 
 
-def compute_file_sha256(path: str) -> str:
-    import hashlib
-    if not os.path.exists(path):
-        return ""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(65536)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def purge_jsdelivr_cdn(repo: str = "solotreason/TvC"):
     """Purges jsDelivr edge cache for version.json, static/ota_bundle.zip, and Timecard-Tracker.apk."""
     import urllib.request
@@ -281,14 +267,6 @@ def pack_ota(version: str = None, notes: str = None):
         build_android_apk()
     except Exception as e:
         print(f"  Warning: Could not auto-build APK during pack-ota: {e}")
-
-    # Record cryptographic SHA-256 digests of the final OTA bundle and APK in root version.json
-    apk_dest = os.path.join(root_dir, "Timecard-Tracker.apk")
-    data["ota_sha256"] = compute_file_sha256(zip_dest)
-    data["apk_sha256"] = compute_file_sha256(apk_dest)
-    with open(v_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
 
     size_kb = os.path.getsize(zip_dest) / 1024
     print(f"\n=======================================================")

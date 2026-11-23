@@ -874,10 +874,6 @@ public class TimecardSyncJobService extends JobService {
             // Trigger (2): Supervisor punch modifications detected in background
             notifyForNewAudits(beforeStore.optJSONArray("audit_logs"), afterStore.optJSONArray("audit_logs"), notifiedSet);
 
-            if (notifiedSet.size() > 400) {
-                List<String> trimmed = new ArrayList<>(notifiedSet);
-                notifiedSet = new HashSet<>(trimmed.subList(trimmed.size() - 300, trimmed.size()));
-            }
             prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, notifiedSet).apply();
         } catch (Exception ignored) {}
     }

@@ -601,31 +601,6 @@
             body: serializedArchive
           }).catch(() => {});
         } catch (e) {}
-
-        // Auto-prune active hot store so timecard_store_v4.json stays < 50 KB forever
-        // (All older weeks, details, audits, and corrections are safely persisted in the permanent archive vault above)
-        let prunedStore = false;
-        if (db.weeks.length > 12) {
-          const keepWeekSet = new Set(db.weeks.slice(0, 12).map(w => w.week_end_date));
-          db.weeks = db.weeks.slice(0, 12);
-          Object.keys(db.week_details || {}).forEach(k => {
-            if (!keepWeekSet.has(k)) {
-              delete db.week_details[k];
-            }
-          });
-          prunedStore = true;
-        }
-        if (Array.isArray(db.audit_logs) && db.audit_logs.length > 200) {
-          db.audit_logs = db.audit_logs.slice(0, 200);
-          prunedStore = true;
-        }
-        if (Array.isArray(db.corrections) && db.corrections.length > 200) {
-          db.corrections = db.corrections.slice(0, 200);
-          prunedStore = true;
-        }
-        if (prunedStore) {
-          saveDatabase(db);
-        }
       } catch (e) {}
     }
 
@@ -635,9 +610,8 @@
   function upsertParsedTimeoff(parsedTimeoff) {
     const db = loadDatabase();
     if (!db.timeoff) {
-      db.timeoff = { profile: { emp_id: '', emp_name: '' }, entitlements: [], synced_at_ms: 0 };
+      db.timeoff = { profile: { emp_id: '', emp_name: '' }, entitlements: [] };
     }
-    db.timeoff.synced_at_ms = Date.now();
     const prevEntitlements = Array.isArray(db.timeoff.entitlements) ? db.timeoff.entitlements : [];
     const prevByType = new Map();
     prevEntitlements.forEach(item => {

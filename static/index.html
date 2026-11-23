@@ -59,9 +59,9 @@
             <span class="hidden sm:inline">Offline Mode</span>
           </div>
 
-          <!-- Single Auth Button: Shows "Log In" when logged out, or "Log Out" when logged in -->
+          <!-- Single Auth Button: Hidden on Sign-In Required gate; shown when dashboard is visible -->
           <button id="authBtn" title="Portal Login"
-            class="px-2.5 py-1.5 text-xs font-semibold rounded border border-[#ced4da] bg-white text-[#495057] hover:bg-[#f8f9fa] flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer whitespace-nowrap">
+            class="hidden px-2.5 py-1.5 text-xs font-semibold rounded border border-[#ced4da] bg-white text-[#495057] hover:bg-[#f8f9fa] items-center gap-1.5 shadow-sm transition-colors cursor-pointer whitespace-nowrap">
             <span id="authDot" class="w-2 h-2 rounded-full bg-[#f59e0b]"></span>
             <span id="authLabel">Log In</span>
           </button>
@@ -100,13 +100,26 @@
     </div>
   </div>
 
-  <!-- Pull-Down-to-Refresh Indicator (Refreshes ONLY the Current Pending Week) -->
-  <div id="pullRefreshContainer"
-    class="overflow-hidden transition-all duration-150 ease-out bg-[#fdfaf0] border-b border-transparent flex items-center justify-center select-none"
-    style="height: 0px;">
-    <div class="flex items-center gap-2 text-xs font-bold text-[#1e293b] py-2">
-      <i id="pullRefreshIcon" class="fa-solid fa-arrow-down text-[#f59e0b] transition-transform duration-200"></i>
-      <span id="pullRefreshText">Pull down to refresh current week only</span>
+  <!-- Native Android APK Update Available Banner -->
+  <div id="apkUpdateBanner" class="hidden bg-gradient-to-r from-[#0f172a] to-[#1e293b] text-white px-4 py-2.5 shadow-md border-b-2 border-[#10b981] sticky top-14 sm:top-16 z-30 transition-all">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs sm:text-sm">
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[#10b981] text-[#0f172a] font-bold text-xs shrink-0">
+          <i class="fa-brands fa-android"></i>
+        </span>
+        <div>
+          <span class="font-bold text-[#34d399]" id="apkBannerTitle">Native App Update Available!</span>
+          <span class="text-slate-300 ml-1.5" id="apkBannerDesc">New background sync &amp; notification engine available on GitHub.</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="apkInstallBannerBtn" class="bg-[#10b981] hover:bg-[#059669] text-[#0f172a] px-3 py-1 rounded font-bold text-xs transition shadow-sm cursor-pointer whitespace-nowrap">
+          Install APK Update
+        </button>
+        <button id="apkDismissBannerBtn" class="text-slate-400 hover:text-white px-1.5 py-1 text-xs cursor-pointer">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -412,9 +425,6 @@
             <h3 class="text-base font-bold text-[#1e293b] flex items-center gap-2">
               <i class="fa-solid fa-box-archive text-[#198754]"></i>
               <span>Historical Timecard Archive</span>
-              <span id="archiveVaultBadge" class="text-[11px] font-semibold px-2 py-0.5 rounded bg-[#d1e7dd] text-[#0f5132] border border-[#badbcc] flex items-center gap-1">
-                <i class="fa-solid fa-shield-halved text-[10px]"></i> Permanent Vault Active
-              </span>
             </h3>
             <p class="text-xs text-[#6c757d] mt-0.5">
               Active weeks are capped at the <b>8 most recent weeks</b>. All older weeks and punch audits are permanently locked in your local &amp; cloud database vault so they are never lost.
@@ -478,11 +488,9 @@
       <span>Personal Shift &amp; Leave Auditor</span>
     </div>
     <div class="text-[10px] sm:text-[11px] text-[#868e96] flex flex-wrap items-center justify-center gap-1.5">
-      <span class="font-semibold text-[#495057]" id="footerVersionBadge">v2.5.1</span>
+      <span class="font-semibold text-[#495057]" id="footerVersionBadge">v2.4.8</span>
       <span class="text-[#ced4da]">•</span>
-      <span class="font-mono text-[#6c757d]" id="footerBuildBadge">Build 2026112206</span>
-      <span class="text-[#ced4da]">•</span>
-      <span class="text-[#198754] font-medium"><i class="fa-solid fa-shield-halved text-[9px]"></i> Permanent Vault Active</span>
+      <span class="font-mono text-[#6c757d]" id="footerBuildBadge">Build 2026111407</span>
       <span class="text-[#ced4da]">•</span>
       <button id="checkOtaUpdateBtn" class="inline-flex items-center gap-1 text-[#0d6efd] hover:text-[#0b5ed7] font-semibold underline decoration-dotted cursor-pointer">
         <i class="fa-solid fa-cloud-arrow-down text-[10px]"></i> Check for Updates
@@ -509,8 +517,12 @@
             <span class="font-bold text-[#1e293b]" id="otaModalVersion">v2.5.1</span>
           </div>
           <div class="flex justify-between">
-            <span class="text-[#6c757d]">Build Timestamp:</span>
-            <span class="font-mono text-[#1e293b]" id="otaModalBuild">2026112207</span>
+            <span class="text-[#6c757d]">Web Bundle Build:</span>
+            <span class="font-mono text-[#1e293b]" id="otaModalBuild">2026112208</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-[#6c757d]">Native APK Build:</span>
+            <span class="font-mono text-[#1e293b]" id="otaModalApkBuild">2026112208</span>
           </div>
           <div class="flex justify-between">
             <span class="text-[#6c757d]">GitHub Repository:</span>
@@ -519,12 +531,15 @@
         </div>
 
         <div id="otaModalStatusMsg" class="text-center font-medium py-1 text-slate-600">
-          Updates download over-the-air from GitHub without reinstalling the APK.
+          Web updates apply automatically; Native APK updates install in 1 tap.
         </div>
 
         <div class="flex flex-col gap-2 pt-1">
           <button id="otaModalCheckBtn" class="w-full bg-[#1e293b] hover:bg-[#334155] text-white font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer">
             <i class="fa-solid fa-arrows-rotate"></i> Check GitHub for Updates
+          </button>
+          <button id="otaModalInstallApkBtn" class="hidden w-full bg-[#10b981] hover:bg-[#059669] text-[#0f172a] font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition cursor-pointer shadow-sm">
+            <i class="fa-brands fa-android text-sm"></i> <span id="otaModalInstallApkText">Install Native App Update (.APK)</span>
           </button>
           <button id="otaModalRollbackBtn" class="w-full bg-white hover:bg-[#fff5f5] text-[#dc3545] border border-[#f8d7da] font-semibold py-1.5 px-3 rounded-lg text-[11px] transition cursor-pointer">
             Revert to Factory APK Bundle
@@ -534,8 +549,8 @@
     </div>
   </div>
 
-  <script src="/static/android_bridge.js?v=24"></script>
-  <script src="/static/app.js?v=24"></script>
+  <script src="/static/android_bridge.js?v=22"></script>
+  <script src="/static/app.js?v=22"></script>
 </body>
 
 </html>

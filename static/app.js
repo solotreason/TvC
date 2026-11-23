@@ -7,7 +7,6 @@ let latestNotifiedTarget = null;
 let pollStatusInterval = null;
 let isSilentSync = false;
 let lastSmartCheckAt = 0;
-let lastTimeoffSyncAt = 0;
 let smartCheckTimer = null;
 const SMART_CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const SMART_RESUME_MIN_GAP_MS = 5 * 60 * 1000; // 5 minutes on app resume
@@ -995,9 +994,6 @@ async function loadTimeOff() {
       tbody.innerHTML = `<tr><td colspan="4" class="p-6 text-center text-[#6c757d]">No entitlement records found.</td></tr>`;
       return;
     }
-    if (lastTimeoffSyncAt === 0) {
-      lastTimeoffSyncAt = Number(data.synced_at_ms) || Date.now();
-    }
 
     entitlements.forEach(item => {
       const tr = document.createElement('tr');
@@ -1103,6 +1099,7 @@ function updateAuthGateUI(hasSyncedWeeks = false) {
   const loginRequiredView = document.getElementById('loginRequiredView');
   const dashboardContent = document.getElementById('dashboardContent');
   const weekSelectContainer = document.getElementById('weekSelectContainer');
+  const authBtn = document.getElementById('authBtn');
   const showDashboard = isUserLoggedIn || hasSyncedWeeks || !!currentWeekData;
 
   if (loginRequiredView) {
@@ -1114,6 +1111,10 @@ function updateAuthGateUI(hasSyncedWeeks = false) {
   if (weekSelectContainer) {
     weekSelectContainer.classList.toggle('hidden', !showDashboard);
     weekSelectContainer.classList.toggle('flex', showDashboard);
+  }
+  if (authBtn) {
+    authBtn.classList.toggle('hidden', !showDashboard);
+    authBtn.classList.toggle('flex', showDashboard);
   }
   refreshBatteryOptimizationNotice();
 }
@@ -1129,7 +1130,7 @@ async function checkAuthStatus() {
     const res = await fetch('/api/auth/status');
     const data = await res.json();
     isUserLoggedIn = !!data.logged_in;
-    updateAuthGateUI();
+    const showDashboard = isUserLoggedIn || !!currentWeekData;
 
     if (isUserLoggedIn) {
       if (authDot) authDot.className = 'w-2 h-2 rounded-full bg-[#dc3545]';
@@ -1146,7 +1147,7 @@ async function checkAuthStatus() {
       if (authDot) authDot.className = 'w-2 h-2 rounded-full bg-[#198754] animate-pulse';
       if (authLabel) authLabel.textContent = 'Log In';
       if (authBtn) {
-        authBtn.className = 'px-2.5 py-1.5 text-xs font-bold rounded border border-[#ffeeba] bg-[#fff3cd] text-[#856404] hover:bg-[#ffe8a1] flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer whitespace-nowrap';
+        authBtn.className = (showDashboard ? 'flex ' : 'hidden ') + 'px-2.5 py-1.5 text-xs font-bold rounded border border-[#ffeeba] bg-[#fff3cd] text-[#856404] hover:bg-[#ffe8a1] items-center gap-1.5 shadow-sm transition-colors cursor-pointer whitespace-nowrap';
         authBtn.title = 'Not authenticated. Click to log in.';
       }
       if (syncBtn) {
@@ -1154,6 +1155,7 @@ async function checkAuthStatus() {
         syncBtn.classList.remove('flex');
       }
     }
+    updateAuthGateUI();
   } catch (err) {
     console.error('Failed to check auth status:', err);
     if (authLabel) authLabel.textContent = 'Log In';
@@ -1161,6 +1163,7 @@ async function checkAuthStatus() {
       syncBtn.classList.add('hidden');
       syncBtn.classList.remove('flex');
     }
+    updateAuthGateUI();
   }
 }
 
@@ -1394,9 +1397,6 @@ async function checkSyncStatus() {
       if (!wasSilent) {
         expandedRows.clear(); // Ensure all day accordions start collapsed after manual sync
       }
-      if (typeof window.__collapsePullRefreshBar === 'function') {
-        window.__collapsePullRefreshBar();
-      }
       await checkAuthStatus();
       await Promise.all([
         loadWeeks(currentWeekData ? currentWeekData.week_end_date : null),
@@ -1447,163 +1447,9 @@ function setupTabs() {
   });
 }
 
-// Pull-Down-to-Refresh handler (Refreshes ONLY the Current Pending Week)
-function setupPullToRefresh() {
-  const container = document.getElementById('pullRefreshContainer');
-  const icon = document.getElementById('pullRefreshIcon');
-  const text = document.getElementById('pullRefreshText');
-  if (!container || !icon || !text) return;
-
-  let startY = null;
-  let currentPull = 0;
-  let isRefreshingPull = false;
-  let isMouseDown = false;
-  const PULL_THRESHOLD = 42;
-
-  function getScrollTop() {
-    return Math.max(
-      window.scrollY || 0,
-      document.documentElement ? document.documentElement.scrollTop || 0 : 0,
-      document.body ? document.body.scrollTop || 0 : 0
-    );
-  }
-
-  function collapsePullBar() {
-    isRefreshingPull = false;
-    startY = null;
-    currentPull = 0;
-    container.style.height = '0px';
-    container.classList.remove('border-[#ffeeba]');
-    icon.className = 'fa-solid fa-arrow-down text-[#f59e0b] transition-transform duration-200';
-    icon.style.transform = 'rotate(0deg)';
-    text.textContent = 'Pull down to refresh current week only';
-  }
-
-  window.__collapsePullRefreshBar = collapsePullBar;
-
-  function onStart(clientY, targetEl) {
-    if (isRefreshingPull) return;
-    if (!isUserLoggedIn && !currentWeekData) {
-      startY = null;
-      return;
-    }
-    if (targetEl && targetEl.closest && targetEl.closest('select, button, input, a')) {
-      startY = null;
-      return;
-    }
-    if (getScrollTop() > 15) {
-      startY = null;
-      return;
-    }
-    startY = clientY;
-    currentPull = 0;
-  }
-
-  function onMove(clientY, rawEvent) {
-    if (startY === null || isRefreshingPull) return;
-    if (getScrollTop() > 15) {
-      resetPull();
-      return;
-    }
-    const delta = clientY - startY;
-    if (delta <= 0) {
-      container.style.height = '0px';
-      currentPull = 0;
-      return;
-    }
-
-    // Prevent browser/WebView native overscroll from firing touchcancel
-    if (delta > 6 && rawEvent && rawEvent.cancelable) {
-      rawEvent.preventDefault();
-    }
-
-    currentPull = Math.min(72, delta * 0.55);
-    container.style.height = `${currentPull}px`;
-    container.classList.add('border-[#ffeeba]');
-
-    if (currentPull >= PULL_THRESHOLD) {
-      icon.style.transform = 'rotate(180deg)';
-      text.textContent = 'Release to refresh current week only';
-    } else {
-      icon.style.transform = 'rotate(0deg)';
-      text.textContent = 'Pull down to refresh current week only';
-    }
-  }
-
-  function resetPull() {
-    if (isRefreshingPull) return;
-    startY = null;
-    currentPull = 0;
-    container.style.height = '0px';
-    container.classList.remove('border-[#ffeeba]');
-    icon.style.transform = 'rotate(0deg)';
-  }
-
-  function onEnd() {
-    if (startY === null || isRefreshingPull) return;
-    const triggered = currentPull >= PULL_THRESHOLD;
-    startY = null;
-    if (triggered) {
-      isRefreshingPull = true;
-      currentPull = 0;
-      container.style.height = '44px';
-      container.classList.add('border-[#ffeeba]');
-      icon.style.transform = 'rotate(0deg)';
-      icon.className = 'fa-solid fa-arrows-rotate fa-spin text-[#d97706]';
-      text.textContent = 'Refreshing current week...';
-      // Refresh ONLY the current week (max_weeks = 1, sync_timeoff = false)
-      triggerSync(true, 1, false);
-    } else {
-      resetPull();
-    }
-  }
-
-  // Touch events for mobile / Android (passive: false on touchmove prevents WebView touchcancel)
-  window.addEventListener('touchstart', (e) => {
-    if (e.touches && e.touches.length === 1) {
-      onStart(e.touches[0].clientY, e.target);
-    }
-  }, { passive: true });
-
-  window.addEventListener('touchmove', (e) => {
-    if (startY !== null && e.touches && e.touches.length === 1) {
-      onMove(e.touches[0].clientY, e);
-    }
-  }, { passive: false });
-
-  window.addEventListener('touchend', onEnd);
-  window.addEventListener('touchcancel', () => {
-    // If the user already pulled past threshold before Android WebView fired touchcancel, still trigger
-    if (currentPull >= PULL_THRESHOLD) {
-      onEnd();
-    } else {
-      resetPull();
-    }
-  });
-
-  // Mouse drag events for Desktop testing & usage
-  window.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    isMouseDown = true;
-    onStart(e.clientY, e.target);
-  });
-
-  window.addEventListener('mousemove', (e) => {
-    if (!isMouseDown || startY === null) return;
-    onMove(e.clientY, null);
-  });
-
-  window.addEventListener('mouseup', () => {
-    if (!isMouseDown) return;
-    isMouseDown = false;
-    onEnd();
-  });
-}
-
 // Initialization on DOMContentLoaded
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
-  setupPullToRefresh();
   setupSmartAutoCheck();
   await checkAuthStatus();
   refreshBatteryOptimizationNotice();
@@ -1684,19 +1530,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadWeekDetails(e.target.value);
   });
 
-  // Smart Tab-Aware "Sync" button:
-  // Fast current-week-only sync on the Time Card tab, and also refreshes the Time Off Entitlement Bank
-  // when on the Time Off tab (#viewTimeOff) or when Time Off hasn't been synced in > 30 minutes.
+  // "Sync" button syncs ONLY the current pending week (initial Login already syncs all 8+ weeks)
   document.getElementById('syncBtn').addEventListener('click', () => {
     requestBrowserNotificationPermission();
-    const viewTimeOff = document.getElementById('viewTimeOff');
-    const isTimeOffTabActive = !!(viewTimeOff && !viewTimeOff.classList.contains('hidden'));
-    const isTimeOffStale = (Date.now() - lastTimeoffSyncAt) > (30 * 60 * 1000);
-    const shouldSyncTimeoff = isTimeOffTabActive || isTimeOffStale;
-    if (shouldSyncTimeoff) {
-      lastTimeoffSyncAt = Date.now();
-    }
-    triggerSync(true, 1, shouldSyncTimeoff);
+    triggerSync(true, 1, false);
   });
 
   const loginFallbackBtn = document.getElementById('loginFallbackBtn');
@@ -1748,7 +1585,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
   }
 
-  // --- Over-The-Air (OTA) Live Updates UI Handling ---
+  // --- Over-The-Air (OTA) & Native APK Live Updates UI Handling ---
+  let latestKnownApkUrl = 'https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk';
+
   window.showOtaUpdateReadyBanner = function (details) {
     const banner = document.getElementById('otaUpdateBanner');
     const desc = document.getElementById('otaBannerDesc');
@@ -1757,7 +1596,81 @@ document.addEventListener('DOMContentLoaded', async () => {
       desc.textContent = `Version v${details.version} (Build ${details.build || ''}) downloaded from GitHub.`;
     }
     banner.classList.remove('hidden');
+    if (details && details.apk_update_available) {
+      window.showApkUpdateBanner(details);
+    }
   };
+
+  window.showApkUpdateBanner = function (details) {
+    if (details && details.apk_url) {
+      latestKnownApkUrl = details.apk_url;
+    }
+    const apkBanner = document.getElementById('apkUpdateBanner');
+    const apkDesc = document.getElementById('apkBannerDesc');
+    const modalBtn = document.getElementById('otaModalInstallApkBtn');
+    const modalBtnText = document.getElementById('otaModalInstallApkText');
+    if (apkDesc && details && details.version) {
+      apkDesc.textContent = `Native APK v${details.version} (Build ${details.apk_build || details.build || ''}) includes updated background sync & notifications.`;
+    }
+    if (apkBanner) {
+      apkBanner.classList.remove('hidden');
+    }
+    if (modalBtn) {
+      modalBtn.classList.remove('hidden');
+      if (modalBtnText && details && details.version) {
+        modalBtnText.textContent = `Install Native Update v${details.version} (.APK)`;
+      }
+    }
+  };
+
+  window.showApkDownloadStatus = function (status) {
+    const msg = document.getElementById('otaModalStatusMsg');
+    const bannerBtn = document.getElementById('apkInstallBannerBtn');
+    if (status && status.downloading) {
+      if (msg) msg.innerHTML = `<span class="text-[#0d6efd] font-semibold"><i class="fa-solid fa-cloud-arrow-down fa-spin mr-1"></i> ${status.message || 'Downloading APK from GitHub...'}</span>`;
+      if (bannerBtn) bannerBtn.textContent = 'Downloading APK...';
+    } else if (status && status.installing) {
+      if (msg) msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-brands fa-android mr-1"></i> ${status.message || 'Launching Android installer...'}</span>`;
+      if (bannerBtn) bannerBtn.textContent = 'Install APK Update';
+    } else if (status && status.error) {
+      if (msg) msg.innerHTML = `<span class="text-[#dc3545] font-semibold"><i class="fa-solid fa-triangle-exclamation mr-1"></i> ${status.message || 'APK download failed.'}</span>`;
+      if (bannerBtn) bannerBtn.textContent = 'Install APK Update';
+    }
+  };
+
+  async function triggerNativeApkInstall() {
+    try {
+      if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.downloadAndInstallApk === 'function') {
+        window.AndroidNative.downloadAndInstallApk(latestKnownApkUrl);
+        return;
+      }
+      const res = await fetch('/api/ota/install-apk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apk_url: latestKnownApkUrl })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.self_install) return;
+      }
+    } catch (e) {}
+
+    // Fallback for pre-2.4.7 factory APKs or web browsers: copy link + open direct download
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(latestKnownApkUrl);
+      }
+    } catch (e) {}
+    const msg = document.getElementById('otaModalStatusMsg');
+    if (msg) {
+      msg.innerHTML = `<div class="text-left bg-[#ecfdf5] border border-[#a7f3d0] rounded p-2 text-[#065f46] text-[11px] space-y-1">
+        <div class="font-bold"><i class="fa-solid fa-check mr-1"></i> Direct APK Link Copied to Clipboard!</div>
+        <div>Paste in Chrome to install <b>v2.4.7 APK</b> once (all future APK updates install 1-tap inside the app):</div>
+        <div class="font-mono text-[10px] break-all select-all bg-white p-1 rounded border border-[#a7f3d0]">${latestKnownApkUrl}</div>
+      </div>`;
+    }
+    if (otaModal) otaModal.classList.remove('hidden');
+  }
 
   let otaCheckTimer = null;
 
@@ -1767,14 +1680,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       otaCheckTimer = null;
     }
     const msg = document.getElementById('otaModalStatusMsg');
+    if (result && result.apk_update_available) {
+      window.showApkUpdateBanner(result);
+    }
     if (!msg) return;
 
-    if (result && result.up_to_date) {
+    if (result && result.apk_update_available) {
+      msg.innerHTML = `<span class="text-[#059669] font-bold"><i class="fa-brands fa-android mr-1"></i> Web UI up to date • Native APK v${result.version || ''} available below!</span>`;
+      refreshOtaModalInfo();
+    } else if (result && result.up_to_date) {
       msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Up to date (v${result.version || ''})</span>`;
+      refreshOtaModalInfo();
     } else if (result && result.downloading) {
       msg.innerHTML = `<span class="text-[#0d6efd] font-semibold"><i class="fa-solid fa-cloud-arrow-down fa-spin mr-1"></i> Downloading update v${result.version || ''}...</span>`;
     } else if (result && (result.update_installed || result.update_ready)) {
-      msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Update v${result.version || ''} ready! Tap reload below.</span>`;
+      msg.innerHTML = `<span class="text-[#198754] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> Update v${result.version || ''} applied!</span>`;
       refreshOtaModalInfo();
     } else if (result && result.error) {
       msg.innerHTML = `<span class="text-[#dc3545] font-semibold"><i class="fa-solid fa-triangle-exclamation mr-1"></i> ${result.message || 'Check failed. Tap Check Now to retry.'}</span>`;
@@ -1787,9 +1707,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const checkOtaBtn = document.getElementById('checkOtaUpdateBtn');
   const closeOtaModalBtn = document.getElementById('closeOtaModalBtn');
   const otaModalCheckBtn = document.getElementById('otaModalCheckBtn');
+  const otaModalInstallApkBtn = document.getElementById('otaModalInstallApkBtn');
   const otaModalRollbackBtn = document.getElementById('otaModalRollbackBtn');
   const otaReloadBtn = document.getElementById('otaReloadBtn');
   const otaDismissBannerBtn = document.getElementById('otaDismissBannerBtn');
+  const apkInstallBannerBtn = document.getElementById('apkInstallBannerBtn');
+  const apkDismissBannerBtn = document.getElementById('apkDismissBannerBtn');
 
   async function refreshOtaModalInfo() {
     try {
@@ -1798,17 +1721,43 @@ document.addEventListener('DOMContentLoaded', async () => {
         const info = await res.json();
         const verEl = document.getElementById('otaModalVersion');
         const buildEl = document.getElementById('otaModalBuild');
+        const apkBuildEl = document.getElementById('otaModalApkBuild');
         const repoEl = document.getElementById('otaModalRepo');
         const footerVer = document.getElementById('footerVersionBadge');
         const footerBuild = document.getElementById('footerBuildBadge');
 
+        if (info.apk_url) latestKnownApkUrl = info.apk_url;
         if (verEl && info.version) verEl.textContent = `v${info.version}`;
         if (buildEl && info.build) buildEl.textContent = String(info.build);
+        if (apkBuildEl) {
+          apkBuildEl.textContent = String(info.apk_build || info.build || '—');
+        }
         if (repoEl && info.github_repo) repoEl.textContent = info.github_repo;
         if (footerVer && info.version) footerVer.textContent = `v${info.version}`;
         if (footerBuild && info.build) footerBuild.textContent = `Build ${info.build}`;
+
+        if (info.apk_update_available && typeof window.AndroidNative !== 'undefined') {
+          window.showApkUpdateBanner(info);
+        } else {
+          if (otaModalInstallApkBtn) otaModalInstallApkBtn.classList.add('hidden');
+          const apkBanner = document.getElementById('apkUpdateBanner');
+          if (apkBanner) apkBanner.classList.add('hidden');
+        }
       }
     } catch (e) {}
+  }
+
+  if (otaModalInstallApkBtn) {
+    otaModalInstallApkBtn.addEventListener('click', () => triggerNativeApkInstall());
+  }
+  if (apkInstallBannerBtn) {
+    apkInstallBannerBtn.addEventListener('click', () => triggerNativeApkInstall());
+  }
+  if (apkDismissBannerBtn) {
+    apkDismissBannerBtn.addEventListener('click', () => {
+      const b = document.getElementById('apkUpdateBanner');
+      if (b) b.classList.add('hidden');
+    });
   }
 
   if (checkOtaBtn) {

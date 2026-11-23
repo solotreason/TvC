@@ -1,5 +1,5 @@
 # TvC - Timecard Viewer 🕒📋🌴
-**Version 2.4.9 (Build 2026112209)**
+**Version 2.4.9 (Build 2026112210)**
 
 A fast, private, personal web dashboard and standalone Android application for tracking and auditing timecards, punch modifications, audit histories, and leave entitlements. Built with Python, FastAPI, SQLite, MongoDB Atlas cloud vault, Tailwind CSS, and Playwright for automated background sync.
 

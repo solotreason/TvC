@@ -142,23 +142,50 @@ function refreshBatteryOptimizationNotice() {
   }
 }
 
-window.refreshDashboardFromStore = async function () {
+window.refreshDashboardFromStore = async function (suppressAlreadyNotified = false) {
   weekDetailsCache.clear();
   await checkAuthStatus();
   await Promise.all([
-    loadWeeks(currentWeekData ? currentWeekData.week_end_date : null),
+    loadWeeks(currentWeekData ? currentWeekData.week_end_date : null, suppressAlreadyNotified),
     loadTimeOff(),
-    loadAuditHistory()
+    loadAuditHistory(suppressAlreadyNotified)
   ]);
   refreshBatteryOptimizationNotice();
 };
+
+function absorbBackgroundNotifiedStateFromStore() {
+  try {
+    if (!window.TimecardBridge || typeof window.TimecardBridge.getStoreSnapshot !== 'function') return;
+    const snap = window.TimecardBridge.getStoreSnapshot();
+    if (!snap || typeof snap !== 'object') return;
+    const weekDetails = snap.week_details || {};
+    Object.keys(weekDetails).forEach(wed => {
+      const w = weekDetails[wed];
+      const shifts = (w && Array.isArray(w.shifts)) ? w.shifts : [];
+      const activeShifts = shifts.filter(s => isCompletedWorkedShift(s) || isOptionDayShift(s));
+      knownWorkedDaysByWeek.set(wed, new Set(activeShifts.map(s => s.date)));
+      activeShifts.forEach(s => {
+        if (s && s.date) notifiedShiftDates.add(s.date);
+      });
+    });
+    if (Array.isArray(snap.audit_logs)) {
+      snap.audit_logs.forEach(a => {
+        if (a && a.date && a.field_name) {
+          const sig = `${a.week_end_date || ''}|${a.date}|${a.field_name}|${a.old_value || ''}|${a.new_value || ''}`;
+          notifiedAuditSignatures.add(sig);
+        }
+      });
+    }
+  } catch (e) {}
+}
 
 async function syncFromNativeDiskIfUpdated() {
   try {
     if (window.TimecardBridge && typeof window.TimecardBridge.reloadFromDiskIfUpdated === 'function') {
       if (window.TimecardBridge.reloadFromDiskIfUpdated()) {
+        absorbBackgroundNotifiedStateFromStore();
         lastSmartCheckAt = Math.max(lastSmartCheckAt, getInitialSmartCheckTimestamp() || Date.now());
-        await window.refreshDashboardFromStore();
+        await window.refreshDashboardFromStore(true);
         return true;
       }
     }
@@ -371,7 +398,7 @@ async function openArchivedWeekInViewer(weekEndDate, statusLabel = 'Archived') {
 }
 
 // Load all available weeks (capped at 8 active weeks; older weeks in archived_weeks)
-async function loadWeeks(preferredWeek = null) {
+async function loadWeeks(preferredWeek = null, suppressNotify = false) {
   try {
     const res = await fetch('/api/weeks');
     const data = await res.json();
@@ -424,7 +451,7 @@ async function loadWeeks(preferredWeek = null) {
 
     const targetWeek = preferredWeek || data.weeks[0].week_end_date;
     select.value = targetWeek;
-    loadWeekDetails(targetWeek, true);
+    await loadWeekDetails(targetWeek, true, suppressNotify);
   } catch (err) {
     console.error('Failed to load weeks:', err);
   }
@@ -560,6 +587,7 @@ function notifyPunchAuditsDetected(newAudits, fallbackWeekEndDate = '') {
 
   const freshAudits = newAudits.filter(a => {
     if (!a || !a.date || !a.field_name) return false;
+    if (isExcludedAlertShift(a)) return false;
     const sig = `${a.week_end_date || ''}|${a.date}|${a.field_name}|${a.old_value || ''}|${a.new_value || ''}`;
     if (notifiedAuditSignatures.has(sig)) return false;
     notifiedAuditSignatures.add(sig);
@@ -606,7 +634,7 @@ function notifyPunchAuditsDetected(newAudits, fallbackWeekEndDate = '') {
 }
 
 // Load details for a selected week (Instant 0ms from cache, or fetch)
-async function loadWeekDetails(weekEndDate, forceRefresh = false) {
+async function loadWeekDetails(weekEndDate, forceRefresh = false, suppressNotify = false) {
   if (!weekEndDate) return;
 
   // Start each week view with all day accordions collapsed by default
@@ -629,12 +657,21 @@ async function loadWeekDetails(weekEndDate, forceRefresh = false) {
     const activeShifts = (data.shifts || []).filter(
       s => isCompletedWorkedShift(s) || isOptionDayShift(s)
     );
-    if (knownWorkedDaysByWeek.has(weekEndDate)) {
+    if (suppressNotify) {
+      activeShifts.forEach(s => {
+        if (s && s.date) notifiedShiftDates.add(s.date);
+      });
+    } else if (knownWorkedDaysByWeek.has(weekEndDate)) {
       const prevSet = knownWorkedDaysByWeek.get(weekEndDate);
       const newlyAdded = activeShifts.filter(s => !prevSet.has(s.date));
       if (newlyAdded.length > 0) {
         notifyDailyTimecardAdded(newlyAdded, weekEndDate);
       }
+    } else {
+      // Initial baseline load for this week: mark existing completed/option-day shifts as already known
+      activeShifts.forEach(s => {
+        if (s && s.date) notifiedShiftDates.add(s.date);
+      });
     }
     knownWorkedDaysByWeek.set(weekEndDate, new Set(activeShifts.map(s => s.date)));
 
@@ -1012,11 +1049,19 @@ async function loadTimeOff() {
 }
 
 // Load Punch Change Audits (Strictly Start Time, End Time, Meal/Unpaid) scoped to the selected week
-async function loadAuditHistory() {
+async function loadAuditHistory(suppressNotify = false) {
   try {
     const res = await fetch('/api/audit-history');
     const data = await res.json();
     allAuditLogs = data.audit_logs || [];
+    if (suppressNotify) {
+      allAuditLogs.forEach(a => {
+        if (a && a.date && a.field_name) {
+          const sig = `${a.week_end_date || ''}|${a.date}|${a.field_name}|${a.old_value || ''}|${a.new_value || ''}`;
+          notifiedAuditSignatures.add(sig);
+        }
+      });
+    }
     renderAuditHistoryForCurrentWeek();
   } catch (err) {
     console.error('Failed to load audit history:', err);
@@ -1214,6 +1259,7 @@ async function logoutUser() {
       weekDetailsCache.clear();
       knownWorkedDaysByWeek.clear();
       notifiedShiftDates.clear();
+      notifiedAuditSignatures.clear();
       expandedRows.clear();
       currentWeekData = null;
       const banner = document.getElementById('statusBanner');

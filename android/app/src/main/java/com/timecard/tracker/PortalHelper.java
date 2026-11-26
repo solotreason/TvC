@@ -166,27 +166,63 @@ final class PortalHelper {
         return f.exists() ? f.lastModified() : 0L;
     }
 
+    /** Returns true when a URL belongs to the destination portal (as opposed to external Microsoft SSO/2FA pages). */
+    static boolean isPortalDestinationUrl(Context context, String url) {
+        if (url == null || url.isEmpty()) return true;
+        String lower = url.toLowerCase();
+        if ("about:blank".equals(lower)) return true;
+        String portalBase = getPortalBaseUrl(context).toLowerCase();
+        if (lower.startsWith(portalBase)
+                || lower.contains("upsers.com")
+                || lower.contains("/time-card-viewer")
+                || lower.contains("/time-off-viewer")
+                || lower.contains("/tools-and-resources/")) {
+            return true;
+        }
+        return false;
+    }
+
+    /** Returns true when a URL is a known external SSO / Identity Provider sign-in domain. */
+    static boolean isExternalSsoLoginUrl(Context context, String url) {
+        if (url == null || url.isEmpty() || isPortalDestinationUrl(context, url)) {
+            return false;
+        }
+        String lower = url.toLowerCase();
+        return lower.contains("login.microsoftonline.com")
+                || lower.contains("login.live.com")
+                || lower.contains("login.windows.net")
+                || lower.contains("microsoft.com/devicelogin")
+                || lower.contains("autologon.microsoftazuread-sso.com")
+                || lower.contains("device.login.microsoftonline.com")
+                || lower.contains("msftauth.net")
+                || lower.contains("msauth.net")
+                || lower.contains("ping")
+                || lower.contains("federation")
+                || lower.contains("saml")
+                || lower.contains("oauth");
+    }
+
     /** Persists or clears the local authentication marker flag cleanly. */
     static void setAuthenticatedFlag(Context context, boolean authenticated) {
-        try {
-            File f = new File(context.getFilesDir(), AUTH_MARKER_FILENAME);
-            if (authenticated) {
-                if (!f.exists()) {
-                    f.createNewFile();
+        synchronized (FILE_LOCK) {
+            try {
+                File f = new File(context.getFilesDir(), AUTH_MARKER_FILENAME);
+                if (authenticated) {
+                    try (FileOutputStream fos = new FileOutputStream(f, false)) {
+                        fos.write("1".getBytes(StandardCharsets.UTF_8));
+                        fos.flush();
+                    }
+                } else if (f.exists()) {
+                    f.delete();
                 }
-            } else if (f.exists()) {
-                f.delete();
-            }
-        } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
+        }
     }
 
     /** Checks whether the user has an active portal/SSO session marker or persisted cookies. */
     static boolean checkCookiesLoggedIn(Context context) {
         try {
             File authFlag = new File(context.getFilesDir(), AUTH_MARKER_FILENAME);
-            if (authFlag.exists()) {
-                return true;
-            }
             CookieManager cm = CookieManager.getInstance();
             String portalCookies = cm.getCookie(getPortalBaseUrl(context));
             String ssoCookies = cm.getCookie("https://login.microsoftonline.com");
@@ -197,9 +233,13 @@ final class PortalHelper {
             );
             boolean hasSso = ssoCookies != null && (
                     ssoCookies.contains("ESTSAUTHPERSISTENT")
+                            || ssoCookies.contains("ESTSAUTH")
                             || ssoCookies.contains("brcap")
             );
-            return hasPortal || hasSso;
+            if (hasPortal || hasSso) {
+                return true;
+            }
+            return authFlag.exists();
         } catch (Exception e) {
             return false;
         }
@@ -305,7 +345,7 @@ final class PortalHelper {
                 "      }" +
                 "    }" +
                 "    var kmsiBtn = document.querySelector('#idSIButton9');" +
-                "    var isKmsi = document.querySelector('#KmsiDescription') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
+                "    var isKmsi = document.querySelector('#KmsiDescription') || document.querySelector('#idBtn_Back') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
                 "    if (kmsiBtn && isKmsi && kmsiBtn.offsetParent !== null) {" +
                 "      kmsiBtn.click(); return 'CLICKED_KMSI';" +
                 "    }" +
@@ -316,8 +356,9 @@ final class PortalHelper {
                 "                           bodyTxt.indexOf('keep your account secure') !== -1 ||" +
                 "                           bodyTxt.indexOf('help us protect your account') !== -1 ||" +
                 "                           bodyTxt.indexOf('secure your account') !== -1;" +
-                "    if (isSecurityScreen) {" +
-                "      setTimeout(function() { window.location.href = " + targetPortalUrl + "; }, 1500);" +
+                "    if (isSecurityScreen && !window.__tvcSecurityRedirectScheduled) {" +
+                "      window.__tvcSecurityRedirectScheduled = true;" +
+                "      setTimeout(function() { window.location.href = " + targetPortalUrl + "; }, 800);" +
                 "      return 'SECURITY_REDIRECT_SCHEDULED';" +
                 "    }" +
                 "  } catch(e) {}" +
@@ -354,11 +395,17 @@ final class PortalHelper {
                 return;
             }
 
-            int notifId = (shiftDate != null && !shiftDate.isEmpty())
-                    ? (shiftDate.hashCode() & 0x7fffffff)
+            String safeTitle = (title != null && !title.trim().isEmpty()) ? title.trim() : "New Timecard Added";
+            String safeBody = (body != null && !body.trim().isEmpty()) ? body.trim() : "A new daily timecard has been posted.";
+            String keySeed = ((weekEndDate != null ? weekEndDate.trim() : "") + "|"
+                    + (shiftDate != null ? shiftDate.trim() : "") + "|"
+                    + safeTitle);
+            int notifId = !keySeed.equals("||New Timecard Added")
+                    ? (keySeed.hashCode() & 0x7fffffff)
                     : (int) (System.currentTimeMillis() & 0x7fffffff);
 
             Intent intent = new Intent(context, MainActivity.class);
+            intent.setAction("com.timecard.tracker.ACTION_FOCUS_SHIFT_" + notifId);
             intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             if (weekEndDate != null && !weekEndDate.isEmpty()) {
                 intent.putExtra(EXTRA_WEEK_END_DATE, weekEndDate);
@@ -375,9 +422,9 @@ final class PortalHelper {
 
             builder.setSmallIcon(R.drawable.ic_stat_tvc)
                     .setColor(0xFFF59E0B)
-                    .setContentTitle(title != null ? title : "New Timecard Added")
-                    .setContentText(body != null ? body : "A new daily timecard has been posted.")
-                    .setStyle(new Notification.BigTextStyle().bigText(body))
+                    .setContentTitle(safeTitle)
+                    .setContentText(safeBody)
+                    .setStyle(new Notification.BigTextStyle().bigText(safeBody))
                     .setAutoCancel(true)
                     .setContentIntent(pendingIntent);
 

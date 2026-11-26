@@ -342,13 +342,185 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("application/vnd.android.package-archive", provider_src)
         self.assertIn("isExcludedAlertShift", job_src)
         self.assertIn("VACATION - EMPLOYEE PREPAID", job_src)
+        self.assertIn("absorbBackgroundNotifiedStateFromStore", app_js_src)
+        self.assertIn("getStoreSnapshot", bridge_src)
+
+    def test_html_snapshot_stress_pipeline_all_alert_rules(self):
+        from backend.parser import parse_timecard_html
+        from backend.database import (
+            save_parsed_week, is_excluded_alert_pay_code,
+            is_option_day_pay_code, is_shift_completed
+        )
+
+        # 1. Seed initial unworked week rows first, then ingest baseline HTML with Mon NO WORK,
+        # Tue Clock-In-Only, Wed Completed, and Thu VACATION - EMPLOYEE PREPAID
+        unworked_seed_html = """<!DOCTYPE html>
+        <html><body>
+          <div class="timecard-wrapper">
+            <div class="timecard-date-dropdown">
+              <select><option value="2026-12-26" selected>Week Ending 12/26/2026 - Pending</option></select>
+            </div>
+            <div class="timecard-summary">
+              <span class="weekGrossPay">$0.00</span>
+              <span class="weekTotalHours">0.00</span>
+              <div class="timecard-wrapper__lastUpdated"><span>12/20/2026 06:00 AM</span></div>
+            </div>
+            <div class="timecard-list-view"><table><tbody>
+              <tr class="timecard-card" data-date="2026-12-21">
+                <td>Mon 12/21/2026</td><td>NO WORK</td><td>N/A</td><td>N/A</td><td>0.00</td><td>$0.00</td><td>0.00</td><td>$0.00</td>
+              </tr>
+              <tr class="timecard-card" data-date="2026-12-22">
+                <td>Tue 12/22/2026</td><td>NO WORK</td><td>N/A</td><td>N/A</td><td>0.00</td><td>$0.00</td><td>0.00</td><td>$0.00</td>
+              </tr>
+              <tr class="timecard-card" data-date="2026-12-23">
+                <td>Wed 12/23/2026</td><td>NO WORK</td><td>N/A</td><td>N/A</td><td>0.00</td><td>$0.00</td><td>0.00</td><td>$0.00</td>
+              </tr>
+              <tr class="timecard-card" data-date="2026-12-24">
+                <td>Thu 12/24/2026</td><td>NO WORK</td><td>N/A</td><td>N/A</td><td>0.00</td><td>$0.00</td><td>0.00</td><td>$0.00</td>
+              </tr>
+            </tbody></table></div>
+          </div>
+        </body></html>"""
+        self.assertEqual(len(save_parsed_week(parse_timecard_html(unworked_seed_html))), 0)
+
+        baseline_html = """<!DOCTYPE html>
+        <html><body>
+          <div class="timecard-wrapper">
+            <div class="timecard-date-dropdown">
+              <select><option value="2026-12-26" selected>Week Ending 12/26/2026 - Pending</option></select>
+            </div>
+            <div class="timecard-summary">
+              <span class="weekGrossPay">$875.00</span>
+              <span class="weekTotalHours">17.75</span>
+              <div class="timecard-wrapper__lastUpdated"><span>12/23/2026 09:00 PM</span></div>
+            </div>
+            <div class="timecard-list-view"><table><tbody>
+              <tr class="timecard-card" data-date="2026-12-21">
+                <td>Mon 12/21/2026</td><td>NO WORK</td><td>N/A</td><td>N/A</td><td>0.00</td><td>$0.00</td><td>0.00</td><td>$0.00</td>
+              </tr>
+              <tr class="timecard-card" data-date="2026-12-22">
+                <td>Tue 12/22/2026</td><td>PAY ACTUAL</td><td>9.00</td><td>N/A</td><td>0.00</td><td>$46.98</td><td>0.00</td><td>$0.00</td>
+              </tr>
+              <tr class="timecard-card activeRow" data-date="2026-12-23">
+                <td>Wed 12/23/2026</td><td>PAY ACTUAL</td><td>9.25</td><td>19.50</td><td>0.50</td><td>$46.98</td><td>9.75</td><td>$499.16</td>
+              </tr>
+              <tr class="timecard-card activeRow" data-date="2026-12-24">
+                <td>Thu 12/24/2026</td><td>VACATION - EMPLOYEE PREPAID</td><td>9.00</td><td>17.00</td><td>0.00</td><td>$46.98</td><td>8.00</td><td>$375.84</td>
+              </tr>
+            </tbody></table></div>
+          </div>
+        </body></html>"""
+
+        parsed_base = parse_timecard_html(baseline_html)
+        base_audits = []
+        base_new_cards = save_parsed_week(parsed_base, new_audits_out=base_audits)
+        # Only Wed 12/23 (Completed worked shift) must fire; Tue 12/22 (clock-in-only) and Thu 12/24 (VACATION - EMPLOYEE PREPAID) must NOT fire!
+        self.assertEqual([c["date"] for c in base_new_cards], ["2026-12-23"])
+        self.assertEqual(len(base_audits), 0)
+
+        # Verify helper classifications on parsed shifts
+        shifts_by_date = {s["date"]: s for s in parsed_base["shifts"]}
+        self.assertFalse(is_shift_completed(shifts_by_date["2026-12-22"]))  # Clock-in-only
+        self.assertTrue(is_shift_completed(shifts_by_date["2026-12-23"]))   # Completed worked shift
+        self.assertTrue(is_excluded_alert_pay_code(shifts_by_date["2026-12-24"]["pay_code"]))
+        self.assertFalse(is_shift_completed(shifts_by_date["2026-12-24"]))  # Prepaid vacation never counts as completed worked alert
+        self.assertFalse(is_option_day_pay_code(shifts_by_date["2026-12-24"]["pay_code"]))
+
+        # 2. Updated Snapshot:
+        # - Mon 12/21 transitions from NO WORK -> OPTION DAY (OPT) -> MUST trigger Option Day new_timecards alert
+        # - Tue 12/22 transitions from Clock-In-Only -> Completed shift -> MUST trigger Completed daily timecard alert
+        # - Wed 12/23 has Start Time modified to 9.50* and Meal modified to 0.75 -> MUST trigger 2 punch audits
+        # - Thu 12/24 (VACATION - EMPLOYEE PREPAID) has hours/times modified -> MUST NOT trigger any alert or audit
+        # - Fri 12/25 newly added as VACATION - EMPLOYEE PREPAID -> MUST NOT trigger any alert
+        updated_html = """<!DOCTYPE html>
+        <html><body>
+          <div class="timecard-wrapper">
+            <div class="timecard-date-dropdown">
+              <select><option value="2026-12-26" selected>Week Ending 12/26/2026 - Pending</option></select>
+            </div>
+            <div class="timecard-summary">
+              <span class="weekGrossPay">$2,100.00</span>
+              <span class="weekTotalHours">43.00</span>
+              <div class="timecard-wrapper__lastUpdated"><span>12/25/2026 09:30 PM</span></div>
+            </div>
+            <div class="timecard-list-view"><table><tbody>
+              <tr class="timecard-card activeRow" data-date="2026-12-21">
+                <td>Mon 12/21/2026</td><td>OPT</td><td>N/A</td><td>N/A</td><td>0.00</td><td>$46.98</td><td>8.00</td><td>$375.84</td>
+              </tr>
+              <tr class="timecard-card activeRow" data-date="2026-12-22">
+                <td>Tue 12/22/2026</td><td>PAY ACTUAL</td><td>9.00</td><td>18.50</td><td>0.00</td><td>$46.98</td><td>9.50</td><td>$446.31</td>
+              </tr>
+              <tr class="timecard-card activeRow" data-date="2026-12-23">
+                <td>Wed 12/23/2026</td><td>PAY ACTUAL</td><td>9.50*</td><td>19.50</td><td>0.75</td><td>$46.98</td><td>9.25</td><td>$465.00</td>
+              </tr>
+              <tr class="timecard-card activeRow" data-date="2026-12-24">
+                <td>Thu 12/24/2026</td><td>VACATION - EMPLOYEE PREPAID</td><td>8.50</td><td>17.50</td><td>0.50</td><td>$46.98</td><td>8.50</td><td>$399.33</td>
+              </tr>
+              <tr class="timecard-card activeRow" data-date="2026-12-25">
+                <td>Fri 12/25/2026</td><td>VACATION - EMPLOYEE PREPAID</td><td>9.00</td><td>17.00</td><td>0.00</td><td>$46.98</td><td>8.00</td><td>$375.84</td>
+              </tr>
+            </tbody></table></div>
+          </div>
+        </body></html>"""
+
+        parsed_upd = parse_timecard_html(updated_html)
+        upd_audits = []
+        upd_new_cards = save_parsed_week(parsed_upd, new_audits_out=upd_audits)
+
+        # Must only alert for Mon 12/21 (Option Day) and Tue 12/22 (Completed Shift) — never Thu/Fri Prepaid Vacation
+        alerted_dates = {c["date"]: c for c in upd_new_cards}
+        self.assertEqual(set(alerted_dates.keys()), {"2026-12-21", "2026-12-22"})
+        self.assertTrue(alerted_dates["2026-12-21"]["is_option_day"])
+        self.assertFalse(alerted_dates["2026-12-22"]["is_option_day"])
+
+        # Audits must strictly be for Wed 12/23 (Start Time & Meal/Unpaid), and zero for Thu 12/24 Prepaid Vacation
+        self.assertEqual(len(upd_audits), 2)
+        audit_dates = {a["date"] for a in upd_audits}
+        self.assertEqual(audit_dates, {"2026-12-23"})
+        audit_fields = {a["field_name"] for a in upd_audits}
+        self.assertEqual(audit_fields, {"Start Time", "Meal/Unpaid"})
+
+        # 3. Stress-test Time Off Viewer Grid View fallback & Option Day / Option Week bank drop detection
+        grid_timeoff_html_before = """<!DOCTYPE html>
+        <html><body>
+          <div class="timeoff-wrapper">
+            <span class="empId">1002003</span>
+            <span class="empName">JANE DOE</span>
+            <div class="timeoff-grid-view">
+              <div class="timeoff-card" data-timeoff-type="OPT">
+                <div class="timeoff-card--header"><span>Option Day</span></div>
+                <p><span>Available Time:</span><span>16.00</span></p>
+                <p><span>Time Basis:</span><span>Hours</span></p>
+                <span data-timeoff-date>Thu 12/31/2026</span>
+              </div>
+              <div class="timeoff-card" data-timeoff-type="VAC">
+                <div class="timeoff-card--header"><span>Vacation</span></div>
+                <p><span>Available Time:</span><span>40.00</span></p>
+                <p><span>Time Basis:</span><span>Hours</span></p>
+                <span data-timeoff-date>N/A</span>
+              </div>
+            </div>
+          </div>
+        </body></html>"""
+
+        grid_timeoff_html_after = grid_timeoff_html_before.replace("<span>16.00</span>", "<span>8.00</span>").replace("<span>40.00</span>", "<span>32.00</span>")
+        t_before = parse_timeoff_html(grid_timeoff_html_before)
+        self.assertEqual(len(t_before["entitlements"]), 2)
+        upsert_entitlements(t_before["entitlements"], t_before["profile"])
+
+        t_after = parse_timeoff_html(grid_timeoff_html_after)
+        opt_drops = upsert_entitlements(t_after["entitlements"], t_after["profile"])
+        # Only OPT drop triggers Option Day alert, NOT regular VAC drop
+        self.assertEqual(len(opt_drops), 1)
+        self.assertEqual(opt_drops[0]["timeoff_type"], "OPT")
+        self.assertAlmostEqual(opt_drops[0]["used_amount"], 8.00)
 
     @classmethod
     def tearDownClass(cls):
         conn = get_connection()
         with conn:
-            conn.execute("DELETE FROM shifts WHERE week_end_date IN ('2026-12-12', '2026-12-19')")
-            conn.execute("DELETE FROM weeks WHERE week_end_date IN ('2026-12-12', '2026-12-19')")
+            conn.execute("DELETE FROM shifts WHERE week_end_date IN ('2026-12-12', '2026-12-19', '2026-12-26')")
+            conn.execute("DELETE FROM weeks WHERE week_end_date IN ('2026-12-12', '2026-12-19', '2026-12-26')")
         conn.close()
 
 if __name__ == "__main__":

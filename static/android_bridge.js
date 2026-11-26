@@ -327,6 +327,38 @@
       }
     });
 
+    if (entitlements.length === 0) {
+      const cards = doc.querySelectorAll('.timeoff-grid-view .timeoff-card');
+      cards.forEach(card => {
+        const timeoffType = (card.getAttribute('data-timeoff-type') || '').trim();
+        const titleEl = card.querySelector('.timeoff-card--header span');
+        const title = titleEl ? titleEl.textContent.trim() : timeoffType;
+        let availVal = 0.0;
+        let timeBasis = 'Hours';
+        let earnDate = null;
+
+        card.querySelectorAll('p').forEach(p => {
+          const txt = p.textContent || '';
+          const spans = p.querySelectorAll('span');
+          if (txt.includes('Available Time:') && spans.length >= 2) {
+            availVal = parseFloatClean(spans[1].textContent);
+          } else if (txt.includes('Time Basis:') && spans.length >= 2) {
+            timeBasis = spans[1].textContent.trim();
+          }
+        });
+        const dateEl = card.querySelector('[data-timeoff-date]');
+        if (dateEl) earnDate = dateEl.textContent.trim();
+
+        entitlements.push({
+          timeoff_type: timeoffType || title.slice(0, 3).toUpperCase(),
+          title: title,
+          available_time: availVal,
+          time_basis: timeBasis,
+          next_earn_date: (earnDate && !earnDate.includes('N/A')) ? earnDate : null
+        });
+      });
+    }
+
     return { profile, entitlements };
   }
 
@@ -452,7 +484,7 @@
         });
       }
 
-      if (existing && !isExcludedNow) {
+      if (existing && !isExcludedNow && !isExcludedAlertPayCode(existing.pay_code, existing.details)) {
         if (!Array.isArray(syncState.new_audits)) syncState.new_audits = [];
         // Check 1: Start Time
         const oldStart = existing.start_time_dec;
@@ -502,10 +534,11 @@
           }
         }
 
-        // Check 3: Meal/Unpaid (only when both old and new records are active punch cards)
+        // Check 3: Meal/Unpaid (only when both old and new records are completed shifts, not clock-in-only to completed transition)
         const oldMeal = existing.meal_unpaid_hours || 0.0;
         const newMeal = newShift.meal_unpaid_hours || 0.0;
-        if (oldStart !== null && oldStart !== undefined && newStart !== null && newStart !== undefined) {
+        if (oldStart !== null && oldStart !== undefined && newStart !== null && newStart !== undefined &&
+            oldEnd !== null && oldEnd !== undefined && newEnd !== null && newEnd !== undefined) {
           if (Math.abs(oldMeal - newMeal) > 0.005) {
             const diffMins = Math.round((newMeal - oldMeal) * 60);
             const entry = {
@@ -713,6 +746,9 @@
     },
     getOptionDayAlertsJson: function () {
       return JSON.stringify(syncState.option_day_alerts || []);
+    },
+    getStoreSnapshot: function () {
+      return loadDatabase();
     },
     recordBackgroundSyncComplete: function (message, statusLabel) {
       const db = loadDatabase();
@@ -1008,6 +1044,9 @@
     if (url.endsWith('/api/auth/login')) {
       syncState.sync_in_progress = true;
       syncState.percent = 15;
+      syncState.new_timecards = [];
+      syncState.new_audits = [];
+      syncState.option_day_alerts = [];
       syncState.stage = 'Awaiting Portal Login';
       syncState.message = 'Complete your login & 2FA in the login sheet...';
       if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.openLoginSheet) {
@@ -1023,6 +1062,9 @@
       }
       syncState.sync_in_progress = false;
       syncState.percent = 0;
+      syncState.new_timecards = [];
+      syncState.new_audits = [];
+      syncState.option_day_alerts = [];
       syncState.stage = 'Logged Out';
       syncState.message = 'Logged out of portal session.';
       syncState.requires_login = false;

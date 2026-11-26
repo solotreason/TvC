@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026112210L;
+    private static final long APP_BASE_BUILD = 2026112501L;
     private static final String APP_BASE_VERSION = "2.4.9";
 
     private WebView dashboardWebView;
@@ -87,6 +87,9 @@ public class MainActivity extends Activity {
     private final List<String> pendingWeeksQueue = new ArrayList<>();
     private int totalWeeksToSync = 0;
     private int weeksSyncedCount = 0;
+    private int syncGeneration = 0;
+    private String pendingNotificationWeekEndDate = null;
+    private String pendingNotificationShiftDate = null;
     private volatile boolean isApkDownloading = false;
     private boolean pendingApkInstallAfterPermission = false;
     private String pendingApkUrl = null;
@@ -104,29 +107,15 @@ public class MainActivity extends Activity {
     }
 
     private String getPortalBaseUrl() {
-        try {
-            File f = new File(getFilesDir(), PORTAL_CFG_FILENAME);
-            if (f.exists()) {
-                byte[] data = readFileFully(f);
-                if (data.length > 0) {
-                    JSONObject obj = new JSONObject(new String(data, StandardCharsets.UTF_8));
-                    String base = obj.optString("base_url", "");
-                    if (!base.isEmpty()) return base;
-                }
-            }
-        } catch (Exception ignored) {}
-        return new String(
-                android.util.Base64.decode("aHR0cHM6Ly93d3cudXBzZXJzLmNvbQ==", android.util.Base64.DEFAULT),
-                StandardCharsets.UTF_8
-        );
+        return PortalHelper.getPortalBaseUrl(this);
     }
 
     private String getTimecardPortalUrl() {
-        return getPortalBaseUrl() + DEFAULT_TIMECARD_PATH;
+        return PortalHelper.getTimecardPortalUrl(this);
     }
 
     private String getTimeoffPortalUrl() {
-        return getPortalBaseUrl() + DEFAULT_TIMEOFF_PATH;
+        return PortalHelper.getTimeoffPortalUrl(this);
     }
 
     /**
@@ -134,32 +123,44 @@ public class MainActivity extends Activity {
      * Used to keep the portal's visual background 100% hidden while allowing SSO sign-in prompts to render.
      */
     private boolean isPortalDestinationUrl(String url) {
-        if (url == null || url.isEmpty()) return false;
-        String lower = url.toLowerCase();
-        if ("about:blank".equals(lower)) return true;
-        if (lower.contains("login.microsoftonline.com")
-                || lower.contains("login.live.com")
-                || lower.contains("mysignins.microsoft.com")
-                || lower.contains("microsoft.com/devicelogin")
-                || lower.contains("autologon.microsoftazuread-sso.com")
-                || lower.contains("device.login.microsoftonline.com")
-                || lower.contains("ping")
-                || lower.contains("federation")
-                || lower.contains("saml")
-                || lower.contains("oauth")) {
+        return PortalHelper.isPortalDestinationUrl(this, url);
+    }
+
+    /**
+     * Returns true when a URL is an external Microsoft / SSO sign-in page where interactive user input may occur.
+     * Note: mysignins.microsoft.com security info screens are auto-bypassed in background and never shown.
+     */
+    private boolean isExternalSsoLoginUrl(String url) {
+        if (url != null && url.toLowerCase().contains("mysignins.microsoft.com")) {
             return false;
         }
-        String portalBase = getPortalBaseUrl().toLowerCase();
-        return lower.startsWith(portalBase)
-                || lower.contains("/time-card-viewer")
-                || lower.contains("/time-off-viewer")
-                || lower.contains("/tools-and-resources/");
+        return PortalHelper.isExternalSsoLoginUrl(this, url);
+    }
+
+    private void hidePortalOverlayImmediately(WebView view) {
+        if (view != null) {
+            view.setAlpha(0f);
+        }
+        if (loginOverlayContainer != null) {
+            loginOverlayContainer.setVisibility(View.GONE);
+        }
+        maskPortalPageVisuals(view);
     }
 
     private void maskPortalPageVisuals(WebView view) {
         if (view == null) return;
         view.evaluateJavascript(
-                "(function(){try{if(document.documentElement){document.documentElement.style.opacity='0';document.documentElement.style.background='#1e293b';}}catch(e){}})();",
+                "(function(){try{" +
+                "if(document.documentElement){" +
+                "  document.documentElement.style.setProperty('opacity','0','important');" +
+                "  document.documentElement.style.setProperty('visibility','hidden','important');" +
+                "  document.documentElement.style.setProperty('background','#1e293b','important');" +
+                "}" +
+                "if(document.body){" +
+                "  document.body.style.setProperty('opacity','0','important');" +
+                "  document.body.style.setProperty('visibility','hidden','important');" +
+                "}" +
+                "}catch(e){}})();",
                 null
         );
     }
@@ -197,6 +198,12 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                dispatchPendingNotificationDeepLink();
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request != null ? request.getUrl() : null;
                 if (uri != null && !APP_HOST.equalsIgnoreCase(uri.getHost())) {
@@ -223,7 +230,7 @@ public class MainActivity extends Activity {
         // 2. Background Scraper + Slide-Up Login Sheet Container
         loginOverlayContainer = new LinearLayout(this);
         loginOverlayContainer.setOrientation(LinearLayout.VERTICAL);
-        loginOverlayContainer.setBackgroundColor(Color.WHITE);
+        loginOverlayContainer.setBackgroundColor(Color.parseColor("#1E293B"));
         loginOverlayContainer.setVisibility(View.GONE);
 
         // Top Bar inside Login Sheet
@@ -293,10 +300,9 @@ public class MainActivity extends Activity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String targetUrl = (request != null && request.getUrl() != null) ? request.getUrl().toString() : "";
-                if (isPortalDestinationUrl(targetUrl)) {
+                if (!isExternalSsoLoginUrl(targetUrl)) {
                     // Hide overlay BEFORE a single pixel of the portal timecard background can render
-                    view.setAlpha(0f);
-                    loginOverlayContainer.setVisibility(View.GONE);
+                    hidePortalOverlayImmediately(view);
                 }
                 return false;
             }
@@ -304,23 +310,16 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
-                if (isPortalDestinationUrl(url)) {
-                    view.setAlpha(0f);
-                    loginOverlayContainer.setVisibility(View.GONE);
-                    maskPortalPageVisuals(view);
-                } else if (isInteractiveLoginMode && url != null && !url.isEmpty()) {
-                    view.setAlpha(1f);
-                    loginOverlayContainer.setVisibility(View.VISIBLE);
+                if (!isExternalSsoLoginUrl(url)) {
+                    hidePortalOverlayImmediately(view);
                 }
             }
 
             @Override
             public void onPageCommitVisible(WebView view, String url) {
                 super.onPageCommitVisible(view, url);
-                if (isPortalDestinationUrl(url)) {
-                    view.setAlpha(0f);
-                    loginOverlayContainer.setVisibility(View.GONE);
-                    maskPortalPageVisuals(view);
+                if (!isExternalSsoLoginUrl(url)) {
+                    hidePortalOverlayImmediately(view);
                 }
             }
 
@@ -328,13 +327,8 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 CookieManager.getInstance().flush();
-                if (isPortalDestinationUrl(url)) {
-                    view.setAlpha(0f);
-                    loginOverlayContainer.setVisibility(View.GONE);
-                    maskPortalPageVisuals(view);
-                } else if (isInteractiveLoginMode && url != null && !url.isEmpty()) {
-                    view.setAlpha(1f);
-                    loginOverlayContainer.setVisibility(View.VISIBLE);
+                if (!isExternalSsoLoginUrl(url)) {
+                    hidePortalOverlayImmediately(view);
                 }
                 PortalHelper.injectMicrosoftSecurityBypass(MainActivity.this, view);
             }
@@ -376,13 +370,34 @@ public class MainActivity extends Activity {
         if ((weekEndDate != null && !weekEndDate.isEmpty()) || (shiftDate != null && !shiftDate.isEmpty())) {
             intent.removeExtra(EXTRA_WEEK_END_DATE);
             intent.removeExtra(EXTRA_SHIFT_DATE);
-            final String jsCall = String.format(
-                    "if(window.focusShiftFromNotification){window.focusShiftFromNotification(%s,%s);}",
-                    JSONObject.quote(weekEndDate != null ? weekEndDate : ""),
-                    JSONObject.quote(shiftDate != null ? shiftDate : "")
-            );
-            mainHandler.postDelayed(() -> dashboardWebView.evaluateJavascript(jsCall, null), 250);
+            pendingNotificationWeekEndDate = weekEndDate != null ? weekEndDate : "";
+            pendingNotificationShiftDate = shiftDate != null ? shiftDate : "";
+            dispatchPendingNotificationDeepLink();
         }
+    }
+
+    private void dispatchPendingNotificationDeepLink() {
+        if (dashboardWebView == null) return;
+        if ((pendingNotificationWeekEndDate == null || pendingNotificationWeekEndDate.isEmpty())
+                && (pendingNotificationShiftDate == null || pendingNotificationShiftDate.isEmpty())) {
+            return;
+        }
+        final String weekArg = JSONObject.quote(pendingNotificationWeekEndDate != null ? pendingNotificationWeekEndDate : "");
+        final String shiftArg = JSONObject.quote(pendingNotificationShiftDate != null ? pendingNotificationShiftDate : "");
+        final String jsCall = String.format(
+                "(function(){if(window.focusShiftFromNotification){window.focusShiftFromNotification(%s,%s);return 'DISPATCHED';}return 'PENDING';})();",
+                weekArg,
+                shiftArg
+        );
+        mainHandler.postDelayed(() -> {
+            if (dashboardWebView == null) return;
+            dashboardWebView.evaluateJavascript(jsCall, result -> {
+                if (result != null && result.contains("DISPATCHED")) {
+                    pendingNotificationWeekEndDate = null;
+                    pendingNotificationShiftDate = null;
+                }
+            });
+        }, 250);
     }
 
     private void setupNotificationChannel() {
@@ -782,14 +797,10 @@ public class MainActivity extends Activity {
 
     private void setAuthenticatedFlag(boolean auth) {
         try {
-            File f = new File(getFilesDir(), AUTH_MARKER_FILENAME);
+            PortalHelper.setAuthenticatedFlag(this, auth);
             if (auth) {
-                try (FileOutputStream fos = new FileOutputStream(f, false)) {
-                    fos.write("1".getBytes(StandardCharsets.UTF_8));
-                }
                 TimecardSyncJobService.schedule(this);
             } else {
-                if (f.exists()) f.delete();
                 TimecardSyncJobService.cancel(this);
             }
         } catch (Exception ignored) {}
@@ -810,15 +821,11 @@ public class MainActivity extends Activity {
     }
 
     private void sendFinishToDashboard(boolean success, String msg, int weeksSynced, boolean reqLogin) {
+        syncGeneration++;
         isSyncRunning = false;
         isInteractiveLoginMode = false;
         mainHandler.post(() -> {
-            if (loginOverlayContainer != null) {
-                loginOverlayContainer.setVisibility(View.GONE);
-            }
-            if (scraperWebView != null) {
-                scraperWebView.setAlpha(0f);
-            }
+            hidePortalOverlayImmediately(scraperWebView);
             String js = String.format(
                     "if(window.TimecardBridge){window.TimecardBridge.finishSync(%b,%s,%d,%b);}",
                     success, JSONObject.quote(msg), weeksSynced, reqLogin
@@ -828,6 +835,7 @@ public class MainActivity extends Activity {
             // Reclaim resources: suspend scraperWebView background execution when idle
             try {
                 if (scraperWebView != null && (loginOverlayContainer == null || loginOverlayContainer.getVisibility() != View.VISIBLE)) {
+                    scraperWebView.stopLoading();
                     scraperWebView.loadUrl("about:blank");
                     scraperWebView.onPause();
                 }
@@ -836,8 +844,8 @@ public class MainActivity extends Activity {
     }
 
     // Monitor scraperWebView until .timecard-wrapper appears
-    private void pollForTimecardWrapper(final int attempt) {
-        if (!isSyncRunning) return;
+    private void pollForTimecardWrapper(final int attempt, final int generation) {
+        if (!isSyncRunning || generation != syncGeneration) return;
 
         if (attempt > 180) {
             sendFinishToDashboard(false, "Timed out waiting for Time Card Viewer.", weeksSyncedCount, true);
@@ -845,9 +853,25 @@ public class MainActivity extends Activity {
         }
 
         String checkJs = "(function(){" +
+                "var href = (window.location.href || '').toLowerCase();" +
+                "var isPortalHost = href.indexOf('upsers.com') !== -1 || href.indexOf('/time-card-viewer') !== -1 || href.indexOf('/time-off-viewer') !== -1 || href.indexOf('/tools-and-resources/') !== -1;" +
+                "if (isPortalHost) {" +
+                "  try {" +
+                "    if (document.documentElement) {" +
+                "      document.documentElement.style.setProperty('opacity', '0', 'important');" +
+                "      document.documentElement.style.setProperty('visibility', 'hidden', 'important');" +
+                "      document.documentElement.style.setProperty('background', '#1e293b', 'important');" +
+                "    }" +
+                "  } catch(e) {}" +
+                "}" +
                 "var w = document.querySelector('.timecard-wrapper');" +
                 "if (w) {" +
-                "  try { if (document.documentElement) document.documentElement.style.opacity = '0'; } catch(e) {}" +
+                "  try {" +
+                "    if (document.documentElement) {" +
+                "      document.documentElement.style.setProperty('opacity', '0', 'important');" +
+                "      document.documentElement.style.setProperty('visibility', 'hidden', 'important');" +
+                "    }" +
+                "  } catch(e) {}" +
                 "  var loader = document.querySelector('#tcvLoader');" +
                 "  var loaderVisible = loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none';" +
                 "  var rows = document.querySelectorAll('tr.timecard-card');" +
@@ -855,8 +879,9 @@ public class MainActivity extends Activity {
                 "  if (!loaderVisible && (rows.length > 0 || opts.length > 0)) return 'READY';" +
                 "  return 'PORTAL_LOADING';" +
                 "}" +
+                "if (isPortalHost) return 'PORTAL_LOADING';" +
                 "var kmsiBtn = document.querySelector('#idSIButton9');" +
-                "var isKmsi = document.querySelector('#KmsiDescription') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
+                "var isKmsi = document.querySelector('#KmsiDescription') || document.querySelector('#idBtn_Back') || (document.body && document.body.innerText.toLowerCase().indexOf('stay signed in?') !== -1);" +
                 "if (kmsiBtn && isKmsi && kmsiBtn.offsetParent !== null) {" +
                 "  kmsiBtn.click(); return 'BYPASSING_KMSI';" +
                 "}" +
@@ -868,7 +893,6 @@ public class MainActivity extends Activity {
                 "    skipCandidates[i].click(); return 'BYPASSING_SECURITY';" +
                 "  }" +
                 "}" +
-                "var href = (window.location.href || '').toLowerCase();" +
                 "var body = document.body ? (document.body.innerText || '').toLowerCase() : '';" +
                 "var isSecurityScreen = href.indexOf('mysignins.microsoft.com') !== -1 ||" +
                 "                       body.indexOf('more information required') !== -1 ||" +
@@ -876,7 +900,7 @@ public class MainActivity extends Activity {
                 "                       body.indexOf('help us protect your account') !== -1 ||" +
                 "                       body.indexOf('secure your account') !== -1;" +
                 "if (isSecurityScreen) return 'FORCE_REDIRECT_PORTAL';" +
-                "var loginSelectors = 'input[name=\"loginfmt\"], #i0116, #i0118, input[name=\"passwd\"], input[type=\"password\"], input[name=\"pf.username\"], input[name=\"pf.pass\"], #idRichContext_DisplaySign, #idTxtBx_SAOTCC_OTC, input[name=\"otc\"]';" +
+                "var loginSelectors = 'input[name=\"loginfmt\"], #i0116, #i0118, input[name=\"passwd\"], input[type=\"password\"], input[name=\"pf.username\"], input[name=\"pf.pass\"], #idRichContext_DisplaySign, #idTxtBx_SAOTCC_OTC, input[name=\"otc\"], #idDiv_SAOTCAS_Description, #idSignInAnotherWay, .table[role=\"listbox\"]';" +
                 "var inputs = document.querySelectorAll(loginSelectors);" +
                 "for (var j = 0; j < inputs.length; j++) {" +
                 "  var inp = inputs[j];" +
@@ -888,54 +912,65 @@ public class MainActivity extends Activity {
                 "})();";
 
         scraperWebView.evaluateJavascript(checkJs, value -> {
+            if (!isSyncRunning || generation != syncGeneration) return;
             String status = value != null ? value.replace("\"", "") : "WAITING";
             if ("READY".equals(status)) {
                 isInteractiveLoginMode = false;
                 setAuthenticatedFlag(true);
                 CookieManager.getInstance().flush();
-                if (scraperWebView != null) scraperWebView.setAlpha(0f);
-                loginOverlayContainer.setVisibility(View.GONE);
+                hidePortalOverlayImmediately(scraperWebView);
                 sendProgressToDashboard(25, "Processing", "Time Card Viewer loaded. Expanding shift cards...", false);
-                mainHandler.postDelayed(this::extractInitialWeekAndQueueDropdown, 500);
+                mainHandler.postDelayed(() -> {
+                    if (isSyncRunning && generation == syncGeneration) {
+                        extractInitialWeekAndQueueDropdown(generation);
+                    }
+                }, 500);
             } else if ("PORTAL_LOADING".equals(status)) {
                 // Portal page reached after 2FA: hide overlay immediately so the portal background never shows!
                 isInteractiveLoginMode = false;
                 setAuthenticatedFlag(true);
                 CookieManager.getInstance().flush();
-                if (scraperWebView != null) scraperWebView.setAlpha(0f);
-                loginOverlayContainer.setVisibility(View.GONE);
+                hidePortalOverlayImmediately(scraperWebView);
                 sendProgressToDashboard(20, "Authenticated", "Signed in! Loading your timecards in background...", false);
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 400);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1, generation), 400);
             } else if ("FORCE_REDIRECT_PORTAL".equals(status)) {
-                if (scraperWebView != null) scraperWebView.setAlpha(0f);
-                loginOverlayContainer.setVisibility(View.GONE);
+                hidePortalOverlayImmediately(scraperWebView);
                 scraperWebView.loadUrl(getTimecardPortalUrl());
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 1000);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1, generation), 1000);
             } else if ("BYPASSING_SECURITY".equals(status) || "BYPASSING_KMSI".equals(status)) {
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 500);
+                hidePortalOverlayImmediately(scraperWebView);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1, generation), 500);
             } else if ("LOGIN".equals(status)) {
-                if (isInteractiveLoginMode) {
+                String currentUrl = scraperWebView != null ? scraperWebView.getUrl() : "";
+                if (isInteractiveLoginMode && isExternalSsoLoginUrl(currentUrl)) {
                     if (scraperWebView != null) scraperWebView.setAlpha(1f);
                     loginOverlayContainer.setVisibility(View.VISIBLE);
                     sendProgressToDashboard(15, "Login Required", "Please sign in and complete 2FA in the window...", true);
-                    mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 800);
+                    mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1, generation), 800);
                 } else {
                     // In background sync, never flash the login window over the dashboard.
                     // Allow up to 8 polling attempts (~6s) for silent cookie SSO redirects.
+                    hidePortalOverlayImmediately(scraperWebView);
                     if (attempt < 8) {
-                        mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 700);
+                        mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1, generation), 700);
                     } else {
+                        setAuthenticatedFlag(false);
                         sendFinishToDashboard(false, "Session authentication required. Tap Log In to connect.", weeksSyncedCount, true);
                     }
                 }
             } else {
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1), 500);
+                String currentUrl = scraperWebView != null ? scraperWebView.getUrl() : "";
+                if (!isExternalSsoLoginUrl(currentUrl)) {
+                    hidePortalOverlayImmediately(scraperWebView);
+                }
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(attempt + 1, generation), 500);
             }
         });
     }
 
     // Batch-expand all shift accordions in 50ms and extract initial week + dropdown options
-    private void extractInitialWeekAndQueueDropdown() {
+    private void extractInitialWeekAndQueueDropdown(final int generation) {
+        if (!isSyncRunning || generation != syncGeneration) return;
         String batchExpandJs = "(function(){" +
                 "var lv = document.querySelector('.list-view'); if(lv) lv.click();" +
                 "document.querySelectorAll('tr.timecard-card').forEach(function(r){" +
@@ -946,17 +981,20 @@ public class MainActivity extends Activity {
 
         scraperWebView.evaluateJavascript(batchExpandJs, v -> {
             mainHandler.postDelayed(() -> {
+                if (!isSyncRunning || generation != syncGeneration) return;
                 scraperWebView.evaluateJavascript("document.documentElement.outerHTML", htmlJson -> {
+                    if (!isSyncRunning || generation != syncGeneration) return;
                     String rawHtml = unquoteJsString(htmlJson);
                     String bridgeJs = "window.TimecardBridge.ingestWeekHtml(" + JSONObject.quote(rawHtml) + ", null)";
                     dashboardWebView.evaluateJavascript(bridgeJs, availWeeksJson -> {
+                        if (!isSyncRunning || generation != syncGeneration) return;
                         weeksSyncedCount = 1;
                         pendingWeeksQueue.clear();
 
                         // If refreshing ONLY the current week (Pull-to-Refresh), skip the 7 finalized weeks
                         if (requestedMaxWeeks == 1) {
                             if (requestedSyncTimeoff) {
-                                syncTimeOffBank();
+                                syncTimeOffBank(generation);
                             } else {
                                 CookieManager.getInstance().flush();
                                 sendFinishToDashboard(
@@ -979,16 +1017,17 @@ public class MainActivity extends Activity {
                         } catch (Exception ignored) {}
 
                         totalWeeksToSync = pendingWeeksQueue.size() + 1;
-                        processNextWeekInQueue(1);
+                        processNextWeekInQueue(1, generation);
                     });
                 });
             }, 400);
         });
     }
 
-    private void processNextWeekInQueue(final int currentWeekIndex) {
+    private void processNextWeekInQueue(final int currentWeekIndex, final int generation) {
+        if (!isSyncRunning || generation != syncGeneration) return;
         if (pendingWeeksQueue.isEmpty()) {
-            syncTimeOffBank();
+            syncTimeOffBank(generation);
             return;
         }
 
@@ -1011,6 +1050,7 @@ public class MainActivity extends Activity {
 
         scraperWebView.evaluateJavascript(selectWeekJs, val -> {
             mainHandler.postDelayed(() -> {
+                if (!isSyncRunning || generation != syncGeneration) return;
                 String expandJs = "(function(){" +
                         "document.querySelectorAll('tr.timecard-card').forEach(function(r){" +
                         "  if(!r.classList.contains('activeRow')) r.click();" +
@@ -1019,14 +1059,17 @@ public class MainActivity extends Activity {
                         "})();";
                 scraperWebView.evaluateJavascript(expandJs, v2 -> {
                     mainHandler.postDelayed(() -> {
+                        if (!isSyncRunning || generation != syncGeneration) return;
                         scraperWebView.evaluateJavascript("document.documentElement.outerHTML", htmlJson -> {
+                            if (!isSyncRunning || generation != syncGeneration) return;
                             String rawHtml = unquoteJsString(htmlJson);
                             String bridgeJs = "window.TimecardBridge.ingestWeekHtml("
                                      + JSONObject.quote(rawHtml) + ", "
                                      + JSONObject.quote(nextWeekDate) + ")";
                             dashboardWebView.evaluateJavascript(bridgeJs, r -> {
+                                if (!isSyncRunning || generation != syncGeneration) return;
                                 weeksSyncedCount++;
-                                processNextWeekInQueue(currentWeekIndex + 1);
+                                processNextWeekInQueue(currentWeekIndex + 1, generation);
                             });
                         });
                     }, 350);
@@ -1035,21 +1078,26 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void syncTimeOffBank() {
+    private void syncTimeOffBank(final int generation) {
+        if (!isSyncRunning || generation != syncGeneration) return;
         sendProgressToDashboard(90, "Time Off Viewer", "Fetching leave balances & Entitlement Bank...", false);
+        hidePortalOverlayImmediately(scraperWebView);
         scraperWebView.loadUrl(getTimeoffPortalUrl());
 
         mainHandler.postDelayed(new Runnable() {
             int retries = 0;
             @Override
             public void run() {
+                if (!isSyncRunning || generation != syncGeneration) return;
                 scraperWebView.evaluateJavascript(
                         "document.querySelector('.timeoff-wrapper') ? document.documentElement.outerHTML : ''",
                         htmlJson -> {
+                            if (!isSyncRunning || generation != syncGeneration) return;
                             String rawHtml = unquoteJsString(htmlJson);
                             if (rawHtml != null && rawHtml.contains("timeoff-wrapper")) {
                                 String bridgeJs = "window.TimecardBridge.ingestTimeoffHtml(" + JSONObject.quote(rawHtml) + ")";
                                 dashboardWebView.evaluateJavascript(bridgeJs, r -> {
+                                    if (!isSyncRunning || generation != syncGeneration) return;
                                     CookieManager.getInstance().flush();
                                     sendFinishToDashboard(
                                             true,
@@ -1062,6 +1110,7 @@ public class MainActivity extends Activity {
                                 retries++;
                                 mainHandler.postDelayed(this, 600);
                             } else {
+                                CookieManager.getInstance().flush();
                                 sendFinishToDashboard(
                                         true,
                                         "Synced " + weeksSyncedCount + " week(s).",
@@ -1267,6 +1316,9 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void logoutSession() {
+            syncGeneration++;
+            isSyncRunning = false;
+            isInteractiveLoginMode = false;
             setAuthenticatedFlag(false);
             PortalHelper.clearBackgroundSyncPrefs(MainActivity.this);
             try {
@@ -1281,8 +1333,10 @@ public class MainActivity extends Activity {
                 cm.removeAllCookies(null);
                 cm.flush();
                 if (scraperWebView != null) {
+                    scraperWebView.stopLoading();
                     scraperWebView.clearCache(true);
                     scraperWebView.clearHistory();
+                    scraperWebView.setAlpha(0f);
                     scraperWebView.loadUrl("about:blank");
                 }
                 if (loginOverlayContainer != null) {
@@ -1298,6 +1352,7 @@ public class MainActivity extends Activity {
                 // On first login, automatically sync all 8+ weeks as soon as login completes.
                 // Keep loginOverlayContainer hidden until scraperWebView redirects to external SSO login page
                 // so the portal's own timecard background never flashes.
+                final int gen = ++syncGeneration;
                 isSyncRunning = true;
                 isInteractiveLoginMode = true;
                 requestedMaxWeeks = 0;
@@ -1305,18 +1360,19 @@ public class MainActivity extends Activity {
                 weeksSyncedCount = 0;
                 if (scraperWebView != null) {
                     scraperWebView.onResume();
-                    scraperWebView.setAlpha(0f);
+                    scraperWebView.stopLoading();
                 }
-                loginOverlayContainer.setVisibility(View.GONE);
+                hidePortalOverlayImmediately(scraperWebView);
                 sendProgressToDashboard(12, "Connecting to Sign-In", "Opening secure SSO sign-in...", false);
                 scraperWebView.loadUrl(getTimecardPortalUrl());
-                mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 400);
+                mainHandler.postDelayed(() -> pollForTimecardWrapper(0, gen), 400);
             });
         }
 
         @JavascriptInterface
         public void startBackgroundSyncWithOptions(int maxWeeks, boolean syncTimeoff) {
             mainHandler.post(() -> {
+                final int gen = ++syncGeneration;
                 isSyncRunning = true;
                 isInteractiveLoginMode = false;
                 requestedMaxWeeks = maxWeeks;
@@ -1324,18 +1380,20 @@ public class MainActivity extends Activity {
                 weeksSyncedCount = 0;
                 if (scraperWebView != null) {
                     scraperWebView.onResume();
-                    scraperWebView.setAlpha(0f);
+                    scraperWebView.stopLoading();
                 }
                 // Keep scraper sheet strictly hidden during background sync
-                loginOverlayContainer.setVisibility(View.GONE);
+                hidePortalOverlayImmediately(scraperWebView);
                 String msg = (maxWeeks == 1)
                         ? "Refreshing current pending week in background..."
                         : "Navigating to Time Card Viewer in background...";
                 sendProgressToDashboard(15, maxWeeks == 1 ? "Refreshing Current Week" : "Connecting", msg, false);
                 scraperWebView.loadUrl("about:blank");
                 mainHandler.postDelayed(() -> {
+                    if (!isSyncRunning || gen != syncGeneration) return;
+                    hidePortalOverlayImmediately(scraperWebView);
                     scraperWebView.loadUrl(getTimecardPortalUrl());
-                    mainHandler.postDelayed(() -> pollForTimecardWrapper(0), 1000);
+                    mainHandler.postDelayed(() -> pollForTimecardWrapper(0, gen), 1000);
                 }, 150);
             });
         }

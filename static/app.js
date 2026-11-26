@@ -5,6 +5,7 @@ let archivedWeeksList = [];
 let allAuditLogs = [];
 let latestNotifiedTarget = null;
 let pollStatusInterval = null;
+let syncPollStartedAt = 0;
 let isSilentSync = false;
 let lastSmartCheckAt = 0;
 let smartCheckTimer = null;
@@ -1214,6 +1215,8 @@ async function checkAuthStatus() {
 
 // Start interactive login flow to get authentication out of the way upfront
 async function startLoginFlow() {
+  isSilentSync = false;
+  syncPollStartedAt = Date.now();
   const banner = document.getElementById('statusBanner');
   const stageTitle = document.getElementById('syncStageTitle');
   const statusMsg = document.getElementById('statusMessage');
@@ -1222,12 +1225,16 @@ async function startLoginFlow() {
   const syncBtn = document.getElementById('syncBtn');
   const syncIcon = document.getElementById('syncIcon');
   const syncDetails = document.getElementById('syncDetails');
+  const loginFallbackBtn = document.getElementById('loginFallbackBtn');
+  const syncPing = document.getElementById('syncPing');
 
   banner.classList.remove('hidden');
+  if (loginFallbackBtn) loginFallbackBtn.classList.add('hidden');
+  if (syncPing) syncPing.classList.remove('hidden');
   stageTitle.textContent = 'Awaiting Portal Login';
-  statusMsg.textContent = 'Please enter your credentials and 2FA...';
-  syncDetails.textContent = 'Complete 2FA in login window';
-  progressBar.style.width = '20%';
+  statusMsg.textContent = 'Opening portal sign-in...';
+  syncDetails.textContent = 'Complete sign-in & 2FA in window';
+  progressBar.style.width = '15%';
   percentBadge.textContent = 'Auth';
   syncBtn.disabled = true;
   syncIcon.classList.add('fa-spin');
@@ -1293,6 +1300,7 @@ async function triggerSync(headless = true, maxWeeks = 0, syncTimeoff = true, si
   }
 
   isSilentSync = !!silent;
+  syncPollStartedAt = Date.now();
   lastSmartCheckAt = Date.now();
 
   const syncBtn = document.getElementById('syncBtn');
@@ -1304,12 +1312,14 @@ async function triggerSync(headless = true, maxWeeks = 0, syncTimeoff = true, si
   const progressBar = document.getElementById('syncProgressBar');
   const syncDetails = document.getElementById('syncDetails');
   const loginFallbackBtn = document.getElementById('loginFallbackBtn');
+  const syncPing = document.getElementById('syncPing');
 
   if (!isSilentSync) {
     syncBtn.disabled = true;
     syncIcon.classList.add('fa-spin');
     banner.classList.remove('hidden');
     if (loginFallbackBtn) loginFallbackBtn.classList.add('hidden');
+    if (syncPing) syncPing.classList.remove('hidden');
 
     const isCurrentWeekOnly = maxWeeks === 1;
     stageTitle.textContent = !headless
@@ -1351,6 +1361,11 @@ async function triggerSync(headless = true, maxWeeks = 0, syncTimeoff = true, si
 // Check Sync Status & Update Progression Bar
 async function checkSyncStatus() {
   try {
+    if (syncPollStartedAt > 0 && (Date.now() - syncPollStartedAt) > 220000) {
+      if (window.TimecardBridge && typeof window.TimecardBridge.finishSync === 'function') {
+        window.TimecardBridge.finishSync(false, 'Sync timed out. Please tap Sync or Log In to retry.', 0, false);
+      }
+    }
     const res = await fetch('/api/status');
     const data = await res.json();
     const banner = document.getElementById('statusBanner');
@@ -1362,6 +1377,7 @@ async function checkSyncStatus() {
     const progressBar = document.getElementById('syncProgressBar');
     const syncDetails = document.getElementById('syncDetails');
     const loginFallbackBtn = document.getElementById('loginFallbackBtn');
+    const syncPing = document.getElementById('syncPing');
 
     if (!isSilentSync) {
       const pct = Math.max(5, Math.min(100, data.percent || 0));
@@ -1377,7 +1393,7 @@ async function checkSyncStatus() {
       if (data.requires_login) {
         if (loginFallbackBtn) loginFallbackBtn.classList.remove('hidden');
         syncDetails.textContent = 'Session authentication required';
-        statusMsg.textContent = 'Please click "Open Login Window" to authenticate your session.';
+        statusMsg.textContent = data.message || 'Please click "Open Login Window" to authenticate your session.';
       } else {
         if (loginFallbackBtn) loginFallbackBtn.classList.add('hidden');
       }
@@ -1386,10 +1402,12 @@ async function checkSyncStatus() {
     if (!data.sync_in_progress) {
       const wasSilent = isSilentSync;
       isSilentSync = false;
+      syncPollStartedAt = 0;
       clearInterval(pollStatusInterval);
       pollStatusInterval = null;
       syncBtn.disabled = false;
       syncIcon.classList.remove('fa-spin');
+      if (syncPing) syncPing.classList.add('hidden');
 
       if (!wasSilent) {
         if (data.latest_log && data.latest_log.status === 'SUCCESS') {
@@ -1584,7 +1602,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const loginFallbackBtn = document.getElementById('loginFallbackBtn');
   if (loginFallbackBtn) {
-    loginFallbackBtn.addEventListener('click', () => triggerSync(false));
+    loginFallbackBtn.addEventListener('click', () => {
+      requestBrowserNotificationPermission();
+      startLoginFlow();
+    });
   }
 
   // Keyboard navigation: Left/Right arrows step across consecutive weeks

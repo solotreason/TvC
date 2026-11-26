@@ -303,17 +303,36 @@ public class TimecardSyncJobService extends JobService {
 
         String checkJs = "(function(){" +
                 "  try {" +
-                "    var loginEl = document.querySelector('input[type=\"password\"], #i0116, #idRichContext_DisplaySign, #idTxtBx_SAOTCC_OTC');" +
+                "    function isDomShown(el) {" +
+                "      if (!el) return false;" +
+                "      var cur = el;" +
+                "      while (cur && cur.nodeType === 1) {" +
+                "        var st = window.getComputedStyle(cur);" +
+                "        if (!st || st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;" +
+                "        cur = cur.parentElement;" +
+                "      }" +
+                "      return true;" +
+                "    }" +
+                "    var href = (window.location.href || '').toLowerCase();" +
+                "    var pathOnly = href.split('?')[0].split('#')[0];" +
+                "    var loginEl = document.querySelector('input[type=\"password\"], input[name=\"loginfmt\"], #i0116, #userID, input[name*=\"user\" i], #idRichContext_DisplaySign, #idTxtBx_SAOTCC_OTC');" +
                 "    var kmsiEl = document.querySelector('#idSIButton9, #btnAskLater, #skipLink');" +
-                "    var interactiveLogin = !!(loginEl && loginEl.offsetParent !== null && !(kmsiEl && kmsiEl.offsetParent !== null));" +
+                "    var isWelcomeOrLoginUrl = pathOnly.indexOf('/welcome') !== -1 || pathOnly.indexOf('/login') !== -1 || pathOnly.indexOf('/signin') !== -1;" +
+                "    var interactiveLogin = !!(isWelcomeOrLoginUrl || (loginEl && isDomShown(loginEl) && !(kmsiEl && isDomShown(kmsiEl))));" +
                 "    var w = document.querySelector('.timecard-wrapper');" +
-                "    var loader = document.querySelector('#tcvLoader');" +
-                "    var loaderVis = !!(loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none');" +
-                "    var rows = document.querySelectorAll('tr.timecard-card');" +
-                "    if (!w || loaderVis || rows.length === 0) {" +
+                "    var hasRealTimecard = !!(w && (document.querySelector('.timecard-date-dropdown') || document.querySelector('#tcvLoader') || document.querySelector('.list-view') || document.querySelector('tr.timecard-card')));" +
+                "    if (!hasRealTimecard) {" +
                 "      return JSON.stringify({ready: false, interactiveLogin: interactiveLogin});" +
                 "    }" +
+                "    var listBtn = document.querySelector('.list-view');" +
+                "    if (listBtn && !listBtn.classList.contains('active')) { try { listBtn.click(); } catch(e) {} }" +
+                "    var loader = document.querySelector('#tcvLoader');" +
+                "    var loaderVis = !!(loader && window.getComputedStyle(loader).display !== 'none' && isDomShown(loader));" +
+                "    var rows = document.querySelectorAll('tr.timecard-card');" +
                 "    var sel = document.querySelector('.timecard-date-dropdown select');" +
+                "    if (loaderVis || (rows.length === 0 && (!sel || sel.options.length === 0 || " + attempt + " < 6))) {" +
+                "      return JSON.stringify({ready: false, interactiveLogin: false});" +
+                "    }" +
                 "    var selectedWeek = sel && sel.value ? sel.value.trim() : '';" +
                 "    var statusText = (sel && sel.selectedIndex >= 0) ? (sel.options[sel.selectedIndex].text || '').trim() : '';" +
                 "    var opts = [];" +

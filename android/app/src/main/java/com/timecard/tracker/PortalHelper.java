@@ -52,6 +52,7 @@ final class PortalHelper {
     static final String PREF_LAST_PAGE_FINGERPRINT = "last_page_fingerprint_v1";
     static final String PREF_LAST_TIMEOFF_SYNC_MS = "last_timeoff_bg_sync_ms";
     static final String PREF_LAST_TIMEOFF_FINGERPRINT = "last_timeoff_fingerprint_v1";
+    static final String PREF_AUTH_SESSION_EXPIRED = "auth_session_expired_v1";
 
     static final String EXTRA_WEEK_END_DATE = "EXTRA_WEEK_END_DATE";
     static final String EXTRA_SHIFT_DATE = "EXTRA_SHIFT_DATE";
@@ -166,40 +167,56 @@ final class PortalHelper {
         return f.exists() ? f.lastModified() : 0L;
     }
 
-    /** Returns true when a URL belongs to the destination portal (as opposed to external Microsoft SSO/2FA pages). */
-    static boolean isPortalDestinationUrl(Context context, String url) {
-        if (url == null || url.isEmpty()) return true;
-        String lower = url.toLowerCase();
+    /**
+     * Returns true ONLY when the URL path itself targets Time Card Viewer or Time Off Viewer (or about:blank).
+     * Never matches /welcome.html, /login, id.ups.com, or SSO URLs that merely carry time-card-viewer in query params.
+     */
+    static boolean isTimecardOrTimeoffViewerUrl(String url) {
+        if (url == null || url.trim().isEmpty()) return true;
+        String lower = url.trim().toLowerCase();
         if ("about:blank".equals(lower)) return true;
-        String portalBase = getPortalBaseUrl(context).toLowerCase();
-        if (lower.startsWith(portalBase)
-                || lower.contains("upsers.com")
-                || lower.contains("/time-card-viewer")
-                || lower.contains("/time-off-viewer")
-                || lower.contains("/tools-and-resources/")) {
-            return true;
-        }
-        return false;
-    }
 
-    /** Returns true when a URL is a known external SSO / Identity Provider sign-in domain. */
-    static boolean isExternalSsoLoginUrl(Context context, String url) {
-        if (url == null || url.isEmpty() || isPortalDestinationUrl(context, url)) {
+        int qIdx = lower.indexOf('?');
+        int hIdx = lower.indexOf('#');
+        int cut = lower.length();
+        if (qIdx >= 0 && qIdx < cut) cut = qIdx;
+        if (hIdx >= 0 && hIdx < cut) cut = hIdx;
+        String withoutQuery = lower.substring(0, cut);
+
+        if (withoutQuery.contains("microsoftonline.com")
+                || withoutQuery.contains("login.live.com")
+                || withoutQuery.contains("login.windows.net")
+                || withoutQuery.contains("id.ups.com")
+                || withoutQuery.contains("fed.ups.com")) {
             return false;
         }
-        String lower = url.toLowerCase();
-        return lower.contains("login.microsoftonline.com")
-                || lower.contains("login.live.com")
-                || lower.contains("login.windows.net")
-                || lower.contains("microsoft.com/devicelogin")
-                || lower.contains("autologon.microsoftazuread-sso.com")
-                || lower.contains("device.login.microsoftonline.com")
-                || lower.contains("msftauth.net")
-                || lower.contains("msauth.net")
-                || lower.contains("ping")
-                || lower.contains("federation")
-                || lower.contains("saml")
-                || lower.contains("oauth");
+
+        String pathOnly = withoutQuery;
+        try {
+            Uri parsed = Uri.parse(url.trim());
+            if (parsed.getPath() != null && !parsed.getPath().isEmpty()) {
+                pathOnly = parsed.getPath().toLowerCase();
+            }
+        } catch (Exception ignored) {}
+
+        return pathOnly.contains("/time-card-viewer") || pathOnly.contains("/time-off-viewer");
+    }
+
+    /** Returns true when a URL is the Time Card / Time Off Viewer destination page (never login/welcome pages). */
+    static boolean isPortalDestinationUrl(Context context, String url) {
+        return isTimecardOrTimeoffViewerUrl(url);
+    }
+
+    /** Returns true when a URL is a sign-in / SSO / welcome page (any non-viewer HTTP URL outside mysignins). */
+    static boolean isExternalSsoLoginUrl(Context context, String url) {
+        if (url == null || url.trim().isEmpty() || isTimecardOrTimeoffViewerUrl(url)) {
+            return false;
+        }
+        String lower = url.trim().toLowerCase();
+        if (lower.contains("mysignins.microsoft.com")) {
+            return false;
+        }
+        return lower.startsWith("http://") || lower.startsWith("https://");
     }
 
     /** Persists or clears the local authentication marker flag cleanly. */
@@ -215,31 +232,36 @@ final class PortalHelper {
                 } else if (f.exists()) {
                     f.delete();
                 }
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean(PREF_AUTH_SESSION_EXPIRED, !authenticated)
+                        .apply();
             } catch (Exception ignored) {}
         }
     }
 
-    /** Checks whether the user has an active portal/SSO session marker or persisted cookies. */
+    /** Checks whether the user has a verified portal/SSO session marker or authenticated SSO cookies. */
     static boolean checkCookiesLoggedIn(Context context) {
         try {
             File authFlag = new File(context.getFilesDir(), AUTH_MARKER_FILENAME);
+            if (authFlag.exists()) {
+                return true;
+            }
+            boolean sessionMarkedExpired = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getBoolean(PREF_AUTH_SESSION_EXPIRED, false);
+            if (sessionMarkedExpired) {
+                return false;
+            }
             CookieManager cm = CookieManager.getInstance();
             String portalCookies = cm.getCookie(getPortalBaseUrl(context));
             String ssoCookies = cm.getCookie("https://login.microsoftonline.com");
-            boolean hasPortal = portalCookies != null && (
-                    portalCookies.contains("user_firstName")
-                            || portalCookies.contains("ak_prt")
-                            || portalCookies.contains("AMCV_")
-            );
-            boolean hasSso = ssoCookies != null && (
+            // Only match real authenticated session cookies, never unauthenticated visitor/analytics cookies
+            boolean hasPortalAuth = portalCookies != null && portalCookies.contains("user_firstName");
+            boolean hasSsoAuth = ssoCookies != null && (
                     ssoCookies.contains("ESTSAUTHPERSISTENT")
-                            || ssoCookies.contains("ESTSAUTH")
-                            || ssoCookies.contains("brcap")
+                            || ssoCookies.contains("ESTSAUTH=")
             );
-            if (hasPortal || hasSso) {
-                return true;
-            }
-            return authFlag.exists();
+            return hasPortalAuth || hasSsoAuth;
         } catch (Exception e) {
             return false;
         }

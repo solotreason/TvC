@@ -40,11 +40,6 @@
   function loadDatabase() {
     if (cachedDb) return cachedDb;
     try {
-      // If running on Android and user is not logged in, ensure a clean empty state
-      if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.isLoggedIn && !window.AndroidNative.isLoggedIn()) {
-        cachedDb = getEmptyDatabase();
-        return cachedDb;
-      }
       let raw = null;
       if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.loadStateJson) {
         raw = window.AndroidNative.loadStateJson();
@@ -64,7 +59,11 @@
     }
 
     const initialDb = getEmptyDatabase();
-    saveDatabase(initialDb);
+    if (typeof window.AndroidNative === 'undefined' || !window.AndroidNative.isLoggedIn || window.AndroidNative.isLoggedIn()) {
+      saveDatabase(initialDb);
+    } else {
+      cachedDb = initialDb;
+    }
     return initialDb;
   }
 
@@ -704,16 +703,26 @@
   // Expose callbacks for Android MainActivity WebView scraper & closed-app TimecardSyncJobService
   window.TimecardBridge = {
     ingestWeekHtml: function (rawHtml, selectedWeekEnd) {
-      const parsed = parseTimecardHtml(rawHtml, selectedWeekEnd || null);
-      const avail = upsertParsedWeek(parsed);
-      syncStoreMtimeFromNative();
-      return JSON.stringify(avail.map(w => w.week_end_date));
+      try {
+        const parsed = parseTimecardHtml(rawHtml, selectedWeekEnd || null);
+        const avail = upsertParsedWeek(parsed);
+        syncStoreMtimeFromNative();
+        return JSON.stringify(avail.map(w => w.week_end_date));
+      } catch (e) {
+        console.error('Failed ingesting week HTML:', e);
+        return '[]';
+      }
     },
     ingestTimeoffHtml: function (rawHtml) {
-      const parsed = parseTimeoffHtml(rawHtml);
-      upsertParsedTimeoff(parsed);
-      syncStoreMtimeFromNative();
-      return 'OK';
+      try {
+        const parsed = parseTimeoffHtml(rawHtml);
+        upsertParsedTimeoff(parsed);
+        syncStoreMtimeFromNative();
+        return 'OK';
+      } catch (e) {
+        console.error('Failed ingesting timeoff HTML:', e);
+        return 'ERR';
+      }
     },
     reloadFromDiskIfUpdated: function () {
       if (typeof window.AndroidNative === 'undefined' || typeof window.AndroidNative.loadStateJson !== 'function') {

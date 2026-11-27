@@ -1,15 +1,23 @@
 """
 Runner script for Timecard Tracker & Time Off Auditor.
 Usage:
-  python run.py               -> Starts the web dashboard at http://localhost:8000 (clean state)
-  python run.py --sync        -> Runs the Playwright sync directly from CLI (all weeks)
-  python run.py --seed-sample -> Seeds database with the provided sample HTML fixtures
-  python run.py --build-apk   -> Syncs web assets & compiles standalone Android APK (Timecard-Tracker.apk)
+  python run.py                        -> Starts the web dashboard at http://localhost:8000 (clean state)
+  python run.py --sync                 -> Runs the Playwright sync directly from CLI (all weeks)
+  python run.py --seed-sample          -> Seeds database with the provided sample HTML fixtures
+  python run.py --pack-ota             -> Packs web-only OTA update (preserves apk_build; no APK reinstall prompt)
+  python run.py --pack-ota --build-apk -> Packs OTA bundle AND compiles standalone Android APK (Timecard-Tracker.apk)
+  python run.py --build-apk            -> Syncs web assets & compiles standalone Android APK (Timecard-Tracker.apk)
+  python run.py --purge-cdn            -> Purges jsDelivr CDN cache for version.json, ota_bundle.zip, and APK
 """
 import sys
 import os
+import re
+import json
+import time
 import shutil
 import glob
+import hashlib
+import zipfile
 import subprocess
 import argparse
 import socket
@@ -83,17 +91,92 @@ def sync_android_assets():
     print(f"Synced clean web assets to {assets_www}")
 
 
-def build_android_apk():
-    """Compiles the standalone Android APK and copies it to Timecard-Tracker.apk."""
-    sync_android_assets()
+def compute_sha256(file_path: str) -> str:
+    """Computes the lowercase hexadecimal SHA-256 digest of a file."""
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
+
+
+def _sync_native_apk_version_files(root_dir: str, version_str: str, apk_build: int):
+    """Synchronizes APP_BASE_BUILD/APP_BASE_VERSION in MainActivity.java and versionCode/versionName in build.gradle."""
+    main_java_path = os.path.join(
+        root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "MainActivity.java"
+    )
+    if os.path.exists(main_java_path):
+        with open(main_java_path, "r", encoding="utf-8") as f:
+            java_txt = f.read()
+        java_txt = re.sub(
+            r'APP_BASE_BUILD\s*=\s*[0-9]+L;',
+            f'APP_BASE_BUILD = {apk_build}L;',
+            java_txt
+        )
+        java_txt = re.sub(
+            r'APP_BASE_VERSION\s*=\s*"[^"]+";',
+            f'APP_BASE_VERSION = "{version_str}";',
+            java_txt
+        )
+        with open(main_java_path, "w", encoding="utf-8") as f:
+            f.write(java_txt)
+
+    gradle_path = os.path.join(root_dir, "android", "app", "build.gradle")
+    if os.path.exists(gradle_path):
+        with open(gradle_path, "r", encoding="utf-8") as f:
+            gradle_txt = f.read()
+        gradle_txt = re.sub(r'versionCode\s+[0-9]+', f'versionCode {apk_build}', gradle_txt)
+        gradle_txt = re.sub(r'versionName\s+"[^"]+"', f'versionName "{version_str}"', gradle_txt)
+        with open(gradle_path, "w", encoding="utf-8") as f:
+            f.write(gradle_txt)
+
+
+def _write_version_json(root_dir: str, static_dir: str, data: dict):
+    """Writes version.json to repo root and mirrors it to static/version.json."""
+    v_path = os.path.join(root_dir, "version.json")
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    if os.path.isdir(static_dir):
+        shutil.copy2(v_path, os.path.join(static_dir, "version.json"))
+
+
+def build_android_apk(update_version_metadata: bool = False, version: str = None, notes: str = None) -> str:
+    """Compiles the standalone Android APK, copies it to Timecard-Tracker.apk, and returns its lowercase SHA-256."""
     root_dir = os.path.dirname(os.path.abspath(__file__))
+    static_dir = os.path.join(root_dir, "static")
+    v_path = os.path.join(root_dir, "version.json")
+    data = {}
+    if update_version_metadata and os.path.exists(v_path):
+        try:
+            with open(v_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        if version:
+            data["version"] = version.strip()
+        if notes:
+            data["release_notes"] = notes.strip()
+        if "build" in data:
+            data["apk_build"] = int(data["build"])
+            _sync_native_apk_version_files(root_dir, str(data.get("version", "2.5.2")), data["apk_build"])
+            _write_version_json(root_dir, static_dir, data)
+
+    sync_android_assets()
     android_dir = os.path.join(root_dir, "android")
 
     gradlew_bat = os.path.join(android_dir, "gradlew.bat")
-    gradle_cmd = gradlew_bat if os.path.exists(gradlew_bat) else shutil.which("gradle")
+    gradlew_sh = os.path.join(android_dir, "gradlew")
+    if os.name == "nt" and os.path.exists(gradlew_bat):
+        gradle_cmd = gradlew_bat
+    elif os.name != "nt" and os.path.exists(gradlew_sh):
+        gradle_cmd = gradlew_sh
+    else:
+        gradle_cmd = shutil.which("gradle")
     if not gradle_cmd:
         user_home = os.path.expanduser("~")
-        candidates = glob.glob(os.path.join(user_home, ".gradle", "wrapper", "dists", "gradle-8.*", "*", "gradle-*", "bin", "gradle.bat"))
+        ext = "gradle.bat" if os.name == "nt" else "gradle"
+        candidates = glob.glob(os.path.join(user_home, ".gradle", "wrapper", "dists", "gradle-8.*", "*", "gradle-*", "bin", ext))
         if candidates:
             gradle_cmd = sorted(candidates)[-1]
 
@@ -106,15 +189,38 @@ def build_android_apk():
 
     built_apk = os.path.join(android_dir, "app", "build", "outputs", "apk", "debug", "app-debug.apk")
     dest_apk = os.path.join(root_dir, "Timecard-Tracker.apk")
-    if os.path.exists(built_apk):
-        shutil.copy2(built_apk, dest_apk)
-        size_mb = os.path.getsize(dest_apk) / (1024 * 1024)
-        print(f"\nSUCCESS! Standalone Android APK built at:\n  {dest_apk} ({size_mb:.2f} MB)")
+    if not os.path.exists(built_apk):
+        raise FileNotFoundError(f"Expected built APK not found at {built_apk}")
+
+    shutil.copy2(built_apk, dest_apk)
+    apk_sha256 = compute_sha256(dest_apk)
+    size_mb = os.path.getsize(dest_apk) / (1024 * 1024)
+    print(f"\nSUCCESS! Standalone Android APK built at:\n  {dest_apk} ({size_mb:.2f} MB, sha256={apk_sha256})")
+
+    if update_version_metadata and data:
+        data["apk_sha256"] = apk_sha256
+        _write_version_json(root_dir, static_dir, data)
+
+    return apk_sha256
 
 
-def purge_jsdelivr_cdn(repo: str = "solotreason/TvC"):
+def purge_jsdelivr_cdn(repo: str = None):
     """Purges jsDelivr edge cache for version.json, static/ota_bundle.zip, and Timecard-Tracker.apk."""
     import urllib.request
+
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    v_path = os.path.join(root_dir, "version.json")
+    ver = "2.5.2"
+    if not repo and os.path.exists(v_path):
+        try:
+            with open(v_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+                repo = meta.get("github_repo")
+                ver = meta.get("version", ver)
+        except Exception:
+            pass
+    repo = repo or "solotreason/TvC"
+
     urls = [
         f"https://purge.jsdelivr.net/gh/{repo}@main/version.json",
         f"https://purge.jsdelivr.net/gh/{repo}@main/static/ota_bundle.zip",
@@ -122,20 +228,15 @@ def purge_jsdelivr_cdn(repo: str = "solotreason/TvC"):
     ]
     for url in urls:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "TvC-Packer/2.4.7"})
+            req = urllib.request.Request(url, headers={"User-Agent": f"TvC-Packer/{ver}"})
             with urllib.request.urlopen(req, timeout=8.0) as resp:
                 print(f"  Purged CDN cache: {url} (HTTP {resp.status})")
         except Exception as e:
             print(f"  Note: Could not purge {url}: {e}")
 
 
-def pack_ota(version: str = None, notes: str = None):
-    """Packs static/ directory into static/ota_bundle.zip, builds Timecard-Tracker.apk, and updates version.json."""
-    import zipfile
-    import json
-    import time
-    import re
-
+def pack_ota(version: str = None, notes: str = None, build_apk: bool = False):
+    """Packs static/ into static/ota_bundle.zip (optionally compiling Timecard-Tracker.apk) and updates version.json with SHA-256 digests."""
     root_dir = os.path.dirname(os.path.abspath(__file__))
     static_dir = os.path.join(root_dir, "static")
     v_path = os.path.join(root_dir, "version.json")
@@ -146,23 +247,31 @@ def pack_ota(version: str = None, notes: str = None):
             with open(v_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            pass
+            data = {}
 
     if version:
         data["version"] = version.strip()
     elif "version" not in data:
-        data["version"] = "2.4.7"
+        data["version"] = "2.5.2"
 
     today_prefix = time.strftime("%Y%m%d")
-    prev_build = str(data.get("build", ""))
+    prev_build_int = 0
+    try:
+        prev_build_int = int(data.get("build", 0))
+    except Exception:
+        prev_build_int = 0
+
+    prev_build = str(prev_build_int) if prev_build_int > 0 else ""
     if prev_build.startswith(today_prefix):
         try:
             seq = int(prev_build[len(today_prefix):]) + 1
-            data["build"] = int(f"{today_prefix}{seq:02d}")
+            candidate_build = int(f"{today_prefix}{seq:02d}")
         except Exception:
-            data["build"] = int(f"{today_prefix}01")
+            candidate_build = int(f"{today_prefix}01")
     else:
-        data["build"] = int(f"{today_prefix}01")
+        candidate_build = int(f"{today_prefix}01")
+
+    data["build"] = max(candidate_build, prev_build_int + 1)
 
     if notes:
         data["release_notes"] = notes.strip()
@@ -170,12 +279,20 @@ def pack_ota(version: str = None, notes: str = None):
         data["release_notes"] = "Performance improvements and bug fixes"
 
     data["github_repo"] = data.get("github_repo", "solotreason/TvC")
-    data["apk_build"] = data["build"]
     data["ota_bundle_url"] = f"https://raw.githubusercontent.com/{data['github_repo']}/main/static/ota_bundle.zip"
     data["apk_url"] = f"https://raw.githubusercontent.com/{data['github_repo']}/main/Timecard-Tracker.apk"
     data["min_apk_version"] = data.get("min_apk_version", 1)
 
-    # Synchronize version & build numbers across index.html, MainActivity.java, build.gradle, and README.md
+    apk_path = os.path.join(root_dir, "Timecard-Tracker.apk")
+    if build_apk:
+        data["apk_build"] = data["build"]
+    else:
+        # Web-only OTA: preserve existing apk_build & apk_sha256 so devices do NOT get prompted to reinstall APK
+        data["apk_build"] = int(data.get("apk_build", data["build"]))
+        if not data.get("apk_sha256") and os.path.exists(apk_path):
+            data["apk_sha256"] = compute_sha256(apk_path)
+
+    # Synchronize version & build numbers in index.html and README.md
     index_html_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_html_path):
         with open(index_html_path, "r", encoding="utf-8") as f:
@@ -210,46 +327,15 @@ def pack_ota(version: str = None, notes: str = None):
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write(readme_txt)
 
-    main_java_path = os.path.join(
-        root_dir, "android", "app", "src", "main", "java", "com", "timecard", "tracker", "MainActivity.java"
-    )
-    if os.path.exists(main_java_path):
-        with open(main_java_path, "r", encoding="utf-8") as f:
-            java_txt = f.read()
-        java_txt = re.sub(
-            r'APP_BASE_BUILD\s*=\s*[0-9]+L;',
-            f'APP_BASE_BUILD = {data["build"]}L;',
-            java_txt
-        )
-        java_txt = re.sub(
-            r'APP_BASE_VERSION\s*=\s*"[^"]+";',
-            f'APP_BASE_VERSION = "{data["version"]}";',
-            java_txt
-        )
-        with open(main_java_path, "w", encoding="utf-8") as f:
-            f.write(java_txt)
+    # Only bump native APP_BASE_BUILD / versionCode and recompile APK when --build-apk is requested
+    if build_apk:
+        _sync_native_apk_version_files(root_dir, data["version"], data["apk_build"])
+        _write_version_json(root_dir, static_dir, data)
+        data["apk_sha256"] = build_android_apk(update_version_metadata=False)
 
-    gradle_path = os.path.join(root_dir, "android", "app", "build.gradle")
-    if os.path.exists(gradle_path):
-        with open(gradle_path, "r", encoding="utf-8") as f:
-            gradle_txt = f.read()
-        gradle_txt = re.sub(r'versionCode\s+[0-9]+', f'versionCode {data["build"]}', gradle_txt)
-        gradle_txt = re.sub(r'versionName\s+"[^"]+"', f'versionName "{data["version"]}"', gradle_txt)
-        with open(gradle_path, "w", encoding="utf-8") as f:
-            f.write(gradle_txt)
+    # Write version metadata prior to creating static/ota_bundle.zip
+    _write_version_json(root_dir, static_dir, data)
 
-    # Save version.json to root
-    with open(v_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-
-    # Also copy to static/version.json
-    shutil.copy2(v_path, os.path.join(static_dir, "version.json"))
-
-    # Sync web assets to android www
-    sync_android_assets()
-
-    # Create static/ota_bundle.zip
     zip_dest = os.path.join(static_dir, "ota_bundle.zip")
     if os.path.exists(zip_dest):
         os.remove(zip_dest)
@@ -262,22 +348,23 @@ def pack_ota(version: str = None, notes: str = None):
             if os.path.isfile(fpath):
                 zf.write(fpath, arcname=fname)
 
-    # Also build Timecard-Tracker.apk so both OTA and Native APK are always up to date
-    try:
-        build_android_apk()
-    except Exception as e:
-        print(f"  Warning: Could not auto-build APK during pack-ota: {e}")
+    # Compute SHA-256 of static/ota_bundle.zip and persist final version.json
+    data["ota_sha256"] = compute_sha256(zip_dest)
+    _write_version_json(root_dir, static_dir, data)
 
     size_kb = os.path.getsize(zip_dest) / 1024
+    pkg_mode = "OTA + Native APK" if build_apk else "Web-Only OTA (Native APK preserved)"
     print(f"\n=======================================================")
-    print(f"  OTA + APK Package Generated Successfully!")
-    print(f"  Version:       v{data['version']} (Build {data['build']})")
+    print(f"  {pkg_mode} Package Generated Successfully!")
+    print(f"  Version:       v{data['version']} (Build {data['build']}, APK Build {data['apk_build']})")
     print(f"  Release Notes: {data['release_notes']}")
     print(f"  Bundle File:   {zip_dest} ({size_kb:.1f} KB)")
-    print(f"  APK File:      {os.path.join(root_dir, 'Timecard-Tracker.apk')}")
+    print(f"  OTA SHA-256:   {data['ota_sha256']}")
+    if data.get("apk_sha256"):
+        print(f"  APK SHA-256:   {data['apk_sha256']}")
     print(f"  GitHub Repo:   https://github.com/{data['github_repo']}")
     print(f"-------------------------------------------------------")
-    print(f"  To push live OTA + APK update to all devices:")
+    print(f"  To push live update to all devices:")
     print(f"    git add .")
     print(f"    git commit -m \"Release v{data['version']} (build {data['build']})\"")
     print(f"    git push origin main")
@@ -344,7 +431,13 @@ def main():
     args = parser.parse_args()
 
     if args.pack_ota:
-        pack_ota(version=args.ver, notes=args.notes)
+        pack_ota(version=args.ver, notes=args.notes, build_apk=args.build_apk)
+        if args.purge_cdn:
+            purge_jsdelivr_cdn()
+        return
+
+    if args.build_apk:
+        build_android_apk(update_version_metadata=True, version=args.ver, notes=args.notes)
         if args.purge_cdn:
             purge_jsdelivr_cdn()
         return
@@ -355,10 +448,6 @@ def main():
 
     if args.seed_sample:
         seed_sample()
-        return
-
-    if args.build_apk:
-        build_android_apk()
         return
 
     if args.sync:

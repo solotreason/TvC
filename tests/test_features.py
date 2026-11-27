@@ -525,6 +525,445 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(opt_drops[0]["timeoff_type"], "OPT")
         self.assertAlmostEqual(opt_drops[0]["used_amount"], 8.00)
 
+    def test_sqlite_connection_cleanup_and_leak_prevention(self):
+        import sqlite3
+        from unittest.mock import patch
+        import backend.database as db
+
+        open_conns = []
+        real_connect = sqlite3.connect
+
+        class _TrackedConn(sqlite3.Connection):
+            def close(self_conn):
+                if self_conn in open_conns:
+                    open_conns.remove(self_conn)
+                return super().close()
+
+        def _tracked_connect(*args, **kwargs):
+            kwargs["factory"] = _TrackedConn
+            c = real_connect(*args, **kwargs)
+            open_conns.append(c)
+            return c
+
+        with patch("backend.database.sqlite3.connect", side_effect=_tracked_connect):
+            # 1. Normal execution paths must close every opened connection
+            db.init_db()
+            self.assertEqual(len(open_conns), 0)
+
+            db.upsert_week({
+                "week_end_date": "2026-12-26",
+                "status": "Pending",
+                "gross_pay": 100.0,
+                "total_hours": 2.0,
+                "last_updated_source": "ConnTest",
+            })
+            self.assertEqual(len(open_conns), 0)
+
+            sid = db.log_sync_start()
+            self.assertEqual(len(open_conns), 0)
+            db.log_sync_complete(sid, "SUCCESS", "Conn check", 1)
+            self.assertEqual(len(open_conns), 0)
+
+            _ = db.get_all_weeks()
+            _ = db.get_week_details("2026-12-26")
+            _ = db.get_week_details("2099-01-01")
+            _ = db.get_entitlements()
+            _ = db.get_all_audit_logs()
+            _ = db.get_all_corrections()
+            _ = db.get_latest_sync_status()
+            self.assertEqual(len(open_conns), 0)
+
+            # 2. Exception paths (missing keys / bad parameters) must STILL close every connection
+            with self.assertRaises(Exception):
+                db.upsert_week({})  # Missing required named parameters
+            self.assertEqual(len(open_conns), 0)
+
+            with self.assertRaises(Exception):
+                db.upsert_shift({"pay_code": "PAY ACTUAL"})  # Missing week_end_date/date
+            self.assertEqual(len(open_conns), 0)
+
+            with self.assertRaises(Exception):
+                db.replace_shift_details("2026-12-21", [{}])  # Missing detail bindings
+            self.assertEqual(len(open_conns), 0)
+
+            with self.assertRaises(Exception):
+                db.insert_correction({})  # Missing correction bindings
+            self.assertEqual(len(open_conns), 0)
+
+            with self.assertRaises(Exception):
+                db.upsert_entitlements([{}])  # Missing entitlement bindings
+            self.assertEqual(len(open_conns), 0)
+
+    def test_option_day_via_details_and_prepaid_vacation_conversion_rules(self):
+        from backend.database import (
+            upsert_week, upsert_shift, replace_shift_details, is_option_day_pay_code
+        )
+        from backend.mongo_vault import _sanitize_error
+
+        # Verify MongoDB credential redaction helper
+        redacted = _sanitize_error("Connection failed: mongodb+srv://admin:s3cr3tPass@cluster0.example.net/db")
+        self.assertNotIn("s3cr3tPass", redacted)
+        self.assertIn("mongodb+srv://***@", redacted)
+
+        # Verify Option Day detection when pay_code is generic ("OTHER") and OPT is in details
+        opt_details = [{
+            "trans_type": "OPT",
+            "op_type": "OPS",
+            "center": "0100",
+            "sort": "DAY",
+            "activity": "PAID LEAVE",
+            "rate": 46.98,
+            "st_hrs": 8.0,
+            "st_amt": 375.84,
+            "ot_hrs": 0.0,
+            "ot_amt": 0.0,
+            "dt_hrs": 0.0,
+            "dt_amt": 0.0,
+            "eq_type": "",
+            "griev_num": "",
+            "flat_amt": 0.0,
+        }]
+        self.assertTrue(is_option_day_pay_code("OTHER", opt_details))
+
+        upsert_week({
+            "week_end_date": "2026-12-19",
+            "status": "Pending",
+            "gross_pay": 0.0,
+            "total_hours": 0.0,
+            "last_updated_source": "EdgeTest",
+        })
+        seed_sun = {
+            "week_end_date": "2026-12-19",
+            "date": "2026-12-13",
+            "day_name": "Sun",
+            "pay_code": "SCHEDULED OFF",
+            "start_time_dec": None,
+            "start_time_clock": None,
+            "is_late": 0,
+            "end_time_dec": None,
+            "end_time_clock": None,
+            "meal_unpaid_hours": 0.0,
+            "pay_rate": 0.0,
+            "total_hours": 0.0,
+            "gross_pay": 0.0,
+        }
+        upsert_shift(seed_sun)
+
+        # First post of detail-backed Option Day on 2026-12-14 -> newly added True
+        opt_via_detail_mon = {
+            **seed_sun,
+            "date": "2026-12-14",
+            "day_name": "Mon",
+            "pay_code": "OTHER",
+            "total_hours": 8.0,
+            "gross_pay": 375.84,
+            "details": opt_details,
+        }
+        self.assertTrue(upsert_shift(opt_via_detail_mon))
+        replace_shift_details("2026-12-14", opt_details)
+
+        # Re-syncing the exact same detail-backed Option Day must NOT re-alert
+        self.assertFalse(upsert_shift(opt_via_detail_mon))
+
+        # Converting a VACATION - EMPLOYEE PREPAID day into a worked PAY ACTUAL shift
+        # must NOT emit bogus punch-audit entries from the dummy vacation hours
+        prepaid_fri = {
+            **seed_sun,
+            "date": "2026-12-18",
+            "day_name": "Fri",
+            "pay_code": "VACATION - EMPLOYEE PREPAID",
+            "start_time_dec": 9.00,
+            "start_time_clock": "9:00 AM",
+            "end_time_dec": 17.00,
+            "end_time_clock": "5:00 PM",
+            "total_hours": 8.0,
+            "gross_pay": 375.84,
+        }
+        conv_audits = []
+        self.assertFalse(upsert_shift(prepaid_fri, new_audits_out=conv_audits))
+        worked_fri = {
+            **prepaid_fri,
+            "pay_code": "PAY ACTUAL",
+            "start_time_dec": 9.25,
+            "start_time_clock": "9:15 AM",
+            "end_time_dec": 18.25,
+            "end_time_clock": "6:15 PM",
+            "meal_unpaid_hours": 0.50,
+            "total_hours": 8.50,
+            "gross_pay": 399.33,
+        }
+        self.assertTrue(upsert_shift(worked_fri, new_audits_out=conv_audits))
+        self.assertEqual(len(conv_audits), 0)
+
+    def test_run_py_sha256_and_ota_packaging_contracts(self):
+        import hashlib
+        import inspect
+        import json
+        import tempfile
+        from unittest.mock import patch
+        import run as runner
+
+        # 1. Verify pack_ota defaults build_apk=False so web-only OTA never forces APK rebuild
+        sig = inspect.signature(runner.pack_ota)
+        self.assertIn("build_apk", sig.parameters)
+        self.assertIs(sig.parameters["build_apk"].default, False)
+
+        # 2. Verify compute_sha256 produces exact lowercase 64-char SHA-256 hex digest
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample_bin = os.path.join(tmpdir, "sample_payload.bin")
+            payload_bytes = b"TvC-OTA-Verification-Payload-2026\x00\xff" * 3000
+            with open(sample_bin, "wb") as f:
+                f.write(payload_bytes)
+            expected_hex = hashlib.sha256(payload_bytes).hexdigest().lower()
+            actual_hex = runner.compute_sha256(sample_bin)
+            self.assertEqual(actual_hex, expected_hex)
+            self.assertEqual(len(actual_hex), 64)
+
+            # 3. Execute pack_ota(build_apk=False) in an isolated temp root to verify:
+            #    - build increments
+            #    - existing apk_build & apk_sha256 are preserved untouched
+            #    - ota_bundle.zip is generated and matches version.json["ota_sha256"]
+            static_dir = os.path.join(tmpdir, "static")
+            os.makedirs(static_dir, exist_ok=True)
+            with open(os.path.join(static_dir, "index.html"), "w", encoding="utf-8") as f:
+                f.write('<span id="otaModalVersion">v2.5.0</span><span id="otaModalBuild">1</span><span id="otaModalApkBuild">1</span>')
+            with open(os.path.join(static_dir, "app.js"), "w", encoding="utf-8") as f:
+                f.write("// dashboard bundle\n")
+            initial_apk_sha = "e" * 64
+            with open(os.path.join(tmpdir, "version.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "version": "2.5.2",
+                    "build": 2026010101,
+                    "apk_build": 2026010101,
+                    "apk_sha256": initial_apk_sha,
+                    "github_repo": "solotreason/TvC",
+                }, f)
+
+            fake_run_py = os.path.join(tmpdir, "run.py")
+            with patch.object(runner, "__file__", fake_run_py), patch.object(runner, "sync_android_assets", lambda: None):
+                runner.pack_ota(version="2.5.3", notes="Web-only OTA test", build_apk=False)
+
+            with open(os.path.join(tmpdir, "version.json"), "r", encoding="utf-8") as f:
+                out_meta = json.load(f)
+
+            zip_path = os.path.join(static_dir, "ota_bundle.zip")
+            self.assertTrue(os.path.isfile(zip_path))
+            self.assertEqual(out_meta["version"], "2.5.3")
+            self.assertGreater(out_meta["build"], 2026010101)
+            self.assertEqual(out_meta["apk_build"], 2026010101)
+            self.assertEqual(out_meta["apk_sha256"], initial_apk_sha)
+            with open(zip_path, "rb") as zf_in:
+                expected_zip_sha = hashlib.sha256(zf_in.read()).hexdigest().lower()
+            self.assertEqual(out_meta["ota_sha256"], expected_zip_sha)
+            self.assertEqual(len(out_meta["ota_sha256"]), 64)
+
+    def test_single_consolidated_notification_behavior_in_app_js(self):
+        import json
+        import shutil
+        import subprocess
+
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        app_js_path = os.path.join(root_dir, "static", "app.js")
+        node_bin = shutil.which("node")
+        self.assertIsNotNone(node_bin, "Node.js is required to execute app.js notification unit tests")
+
+        harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const appJsPath = process.argv[1];
+const code = fs.readFileSync(appJsPath, 'utf8');
+
+function makeElement() {
+  return {
+    textContent: '',
+    innerHTML: '',
+    value: '',
+    disabled: false,
+    title: '',
+    style: {},
+    dataset: {},
+    options: [],
+    className: '',
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    addEventListener() {},
+    appendChild(opt) { this.options.push(opt); },
+    querySelector() { return makeElement(); },
+    closest() { return null; },
+    click() {},
+    scrollIntoView() {}
+  };
+}
+
+function runScenario(hasAndroidNative) {
+  let nativeCalls = [];
+  let browserCalls = [];
+  const elements = new Map();
+  const getEl = (id) => {
+    if (!elements.has(id)) elements.set(id, makeElement());
+    return elements.get(id);
+  };
+
+  function FakeNotification(title, opts) {
+    browserCalls.push({ title, opts });
+  }
+  FakeNotification.permission = 'granted';
+  FakeNotification.requestPermission = () => Promise.resolve('granted');
+
+  const statusPayload = {
+    sync_in_progress: false,
+    percent: 100,
+    stage: 'Complete',
+    message: 'Synced',
+    requires_login: false,
+    latest_log: { status: 'SUCCESS', message: 'Synced 1 week' },
+    new_timecards: [
+      {
+        week_end_date: '2026-12-26',
+        date: '2026-12-21',
+        day_name: 'Mon',
+        pay_code: 'OPTION DAY',
+        is_option_day: true,
+        total_hours: 8.0,
+        gross_pay: 375.84
+      },
+      {
+        week_end_date: '2026-12-26',
+        date: '2026-12-23',
+        day_name: 'Wed',
+        pay_code: 'PAY ACTUAL',
+        start_time_dec: 9.0,
+        start_time_clock: '9:00 AM',
+        end_time_dec: 18.5,
+        end_time_clock: '6:30 PM',
+        total_hours: 9.0,
+        gross_pay: 446.31
+      }
+    ],
+    new_audits: [
+      {
+        week_end_date: '2026-12-26',
+        date: '2026-12-22',
+        field_name: 'Start Time',
+        old_value: '9:00 AM (9.00)',
+        new_value: '9:15 AM (9.25)',
+        diff_num: 15
+      }
+    ],
+    option_day_alerts: [
+      {
+        is_option_day: true,
+        from_entitlement_bank: true,
+        timeoff_type: 'OPT',
+        title: 'Option Day',
+        old_available: 2.0,
+        new_available: 1.0,
+        used_amount: 1.0,
+        time_basis: 'Days'
+      }
+    ]
+  };
+
+  const weekDetailPayload = {
+    week_end_date: '2026-12-26',
+    status: 'Pending',
+    gross_pay: 822.15,
+    total_hours: 17.0,
+    shifts: statusPayload.new_timecards
+  };
+
+  const sandbox = {
+    console,
+    Intl,
+    Date,
+    Math,
+    Number,
+    String,
+    Array,
+    Object,
+    Set,
+    Map,
+    JSON,
+    Promise,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    localStorage: { getItem: () => null, setItem: () => {} },
+    navigator: { onLine: true },
+    Notification: FakeNotification,
+    confirm: () => true,
+    alert: () => {},
+    document: {
+      visibilityState: 'visible',
+      activeElement: null,
+      getElementById: getEl,
+      createElement: () => makeElement(),
+      querySelector: () => makeElement(),
+      addEventListener: () => {}
+    },
+    fetch: async (url) => {
+      if (url === '/api/status') return { ok: true, status: 200, json: async () => statusPayload };
+      if (url === '/api/weeks') return { ok: true, status: 200, json: async () => ({ weeks: [{ week_end_date: '2026-12-26', status: 'Pending' }], archived_weeks: [] }) };
+      if (String(url).startsWith('/api/weeks/')) return { ok: true, status: 200, json: async () => weekDetailPayload };
+      if (url === '/api/timeoff') return { ok: true, status: 200, json: async () => ({ profile: null, entitlements: [] }) };
+      if (url === '/api/audit-history') return { ok: true, status: 200, json: async () => ({ audit_logs: statusPayload.new_audits }) };
+      if (url === '/api/auth/status') return { ok: true, status: 200, json: async () => ({ logged_in: true }) };
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    }
+  };
+  sandbox.window = sandbox;
+  if (hasAndroidNative) {
+    sandbox.AndroidNative = {
+      showTimecardNotificationForShift(title, body, weekEnd, shiftDate) {
+        nativeCalls.push({ title, body, weekEnd, shiftDate });
+      },
+      getStoreLastModified: () => 0,
+      isIgnoringBatteryOptimizations: () => true
+    };
+  }
+
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox);
+
+  // Seed knownWorkedDaysByWeek with an earlier empty/different day so loadWeekDetails sees 12/21 & 12/23 as newly added if not already recorded!
+  vm.runInContext("knownWorkedDaysByWeek.set('2026-12-26', new Set(['2026-12-20']));", sandbox);
+
+  return (async () => {
+    await sandbox.checkSyncStatus();
+    const firstPass = { native: nativeCalls.length, browser: browserCalls.length };
+    // Second pass with identical state must emit 0 additional notifications
+    await sandbox.checkSyncStatus();
+    const secondPass = { native: nativeCalls.length, browser: browserCalls.length };
+    return { firstPass, secondPass };
+  })();
+}
+
+(async () => {
+  const androidRes = await runScenario(true);
+  const webRes = await runScenario(false);
+  console.log(JSON.stringify({ androidRes, webRes }));
+})();
+"""
+        proc = subprocess.run(
+            [node_bin, "-e", harness, app_js_path],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        results = json.loads(proc.stdout.strip().splitlines()[-1])
+
+        # Android WebView: strictly 1 native notification and 0 browser Notification() calls
+        self.assertEqual(results["androidRes"]["firstPass"]["native"], 1)
+        self.assertEqual(results["androidRes"]["firstPass"]["browser"], 0)
+        self.assertEqual(results["androidRes"]["secondPass"]["native"], 1)
+        self.assertEqual(results["androidRes"]["secondPass"]["browser"], 0)
+
+        # Web browser (no AndroidNative): strictly 1 consolidated browser Notification() call per sync cycle
+        self.assertEqual(results["webRes"]["firstPass"]["browser"], 1)
+        self.assertEqual(results["webRes"]["secondPass"]["browser"], 1)
+
     @classmethod
     def tearDownClass(cls):
         conn = get_connection()

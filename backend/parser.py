@@ -7,6 +7,7 @@ Extracts:
 - Accordion shift breakdown details (ST, OT, DT, activity codes)
 - Corrections table entries
 """
+import math
 import re
 from typing import Dict, Any, Optional
 from bs4 import BeautifulSoup
@@ -14,14 +15,16 @@ from .time_utils import parse_decimal_time
 
 
 def parse_float(val: Any, default: float = 0.0) -> float:
-    if val is None:
+    if val is None or isinstance(val, bool):
         return default
     if isinstance(val, (int, float)):
-        return float(val)
+        fval = float(val)
+        return fval if math.isfinite(fval) else default
     # Strip currency signs, commas, extra whitespace
     cleaned = re.sub(r"[^\d.-]", "", str(val))
     try:
-        return float(cleaned) if cleaned else default
+        fval = float(cleaned) if cleaned else default
+        return fval if math.isfinite(fval) else default
     except ValueError:
         return default
 
@@ -124,8 +127,7 @@ def parse_timecard_html(html_content: str, selected_week_end: Optional[str] = No
         }
 
         # Look for the accordion row right after this row
-        acc_class = f"acc{date_str}"
-        acc_tr = soup.select_one(f"tr.{acc_class}")
+        acc_tr = soup.find("tr", class_=f"acc{date_str}") if date_str else None
         if acc_tr:
             detail_tbody = acc_tr.select_one("tbody")
             if detail_tbody:

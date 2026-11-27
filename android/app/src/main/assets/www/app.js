@@ -5,10 +5,13 @@ let archivedWeeksList = [];
 let allAuditLogs = [];
 let latestNotifiedTarget = null;
 let pollStatusInterval = null;
+let isCheckingSyncStatus = false;
 let syncPollStartedAt = 0;
 let isSilentSync = false;
 let lastSmartCheckAt = 0;
 let smartCheckTimer = null;
+let isHandlingForegroundResume = false;
+let lastForegroundResumeAt = 0;
 const SMART_CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const SMART_RESUME_MIN_GAP_MS = 5 * 60 * 1000; // 5 minutes on app resume
 const expandedRows = new Set(); // Stores dates of expanded activeRows (starts empty so no day is forced open)
@@ -194,7 +197,12 @@ async function syncFromNativeDiskIfUpdated() {
   return false;
 }
 
-function runSmartAutoCheckIfNeeded(minGapMs = SMART_CHECK_INTERVAL_MS) {
+async function runSmartAutoCheckIfNeeded(minGapMs = SMART_CHECK_INTERVAL_MS) {
+  await syncFromNativeDiskIfUpdated();
+  const diskStamp = getInitialSmartCheckTimestamp();
+  if (diskStamp > lastSmartCheckAt) {
+    lastSmartCheckAt = diskStamp;
+  }
   if (!isUserLoggedIn || pollStatusInterval !== null) return;
   if (!isWaitingForDailyTimecard()) return;
   const now = Date.now();
@@ -204,6 +212,20 @@ function runSmartAutoCheckIfNeeded(minGapMs = SMART_CHECK_INTERVAL_MS) {
   triggerSync(true, 1, false, true);
 }
 
+async function handleAppForegroundResume() {
+  const now = Date.now();
+  if (isHandlingForegroundResume || (now - lastForegroundResumeAt) < 1500) return;
+  isHandlingForegroundResume = true;
+  lastForegroundResumeAt = now;
+  try {
+    await syncFromNativeDiskIfUpdated();
+    refreshBatteryOptimizationNotice();
+    await runSmartAutoCheckIfNeeded(SMART_RESUME_MIN_GAP_MS);
+  } finally {
+    isHandlingForegroundResume = false;
+  }
+}
+
 function setupSmartAutoCheck() {
   lastSmartCheckAt = getInitialSmartCheckTimestamp();
   if (smartCheckTimer) clearInterval(smartCheckTimer);
@@ -211,18 +233,14 @@ function setupSmartAutoCheck() {
     runSmartAutoCheckIfNeeded(SMART_CHECK_INTERVAL_MS - 5000);
   }, 60 * 1000); // Lightweight 60s tick that checks elapsed time & sleep condition
 
-  document.addEventListener('visibilitychange', async () => {
+  document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
-      await syncFromNativeDiskIfUpdated();
-      refreshBatteryOptimizationNotice();
-      runSmartAutoCheckIfNeeded(SMART_RESUME_MIN_GAP_MS);
+      handleAppForegroundResume();
     }
   });
 
-  window.onAppResumedSmartCheck = async function () {
-    await syncFromNativeDiskIfUpdated();
-    refreshBatteryOptimizationNotice();
-    runSmartAutoCheckIfNeeded(SMART_RESUME_MIN_GAP_MS);
+  window.onAppResumedSmartCheck = function () {
+    handleAppForegroundResume();
   };
 }
 
@@ -463,8 +481,10 @@ const weekDetailsCache = new Map();
 const knownWorkedDaysByWeek = new Map(); // Tracks known active shift dates per week to detect newly posted daily timecards
 const notifiedShiftDates = new Set();
 const notifiedAuditSignatures = new Set();
+const notifiedOptionBankSignatures = new Set();
 
 function requestBrowserNotificationPermission() {
+  if (typeof window.AndroidNative !== 'undefined') return;
   try {
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission();
@@ -472,12 +492,52 @@ function requestBrowserNotificationPermission() {
   } catch (e) {}
 }
 
+function dispatchSystemNotification(title, body, targetWeekEnd = '', targetShiftDate = '') {
+  latestNotifiedTarget = { weekEndDate: targetWeekEnd || '', shiftDate: targetShiftDate || '' };
+
+  // 1. Show In-App Notification Banner
+  const toast = document.getElementById('newTimecardToast');
+  const toastTitle = document.getElementById('newTimecardToastTitle');
+  const toastBody = document.getElementById('newTimecardToastBody');
+  if (toast && toastTitle && toastBody) {
+    toastTitle.textContent = title;
+    toastBody.textContent = body;
+    toast.classList.remove('hidden');
+  }
+
+  // 2. Native Android Status Bar Notification OR Web Browser OS Notification (strictly mutually exclusive)
+  if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.showTimecardNotificationForShift === 'function') {
+    try {
+      window.AndroidNative.showTimecardNotificationForShift(title, body, targetWeekEnd || '', targetShiftDate || '');
+    } catch (e) {}
+    return;
+  }
+
+  try {
+    if (typeof window.AndroidNative === 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      const n = new Notification(title, { body: body });
+      n.onclick = () => {
+        try { window.focus(); } catch (e) {}
+        window.focusShiftFromNotification(targetWeekEnd || '', targetShiftDate || '');
+      };
+    }
+  } catch (e) {}
+}
+
 // Deep-Link Handler: Open Time Card Viewer to the target week, expand day, scroll & pulse highlight
 window.focusShiftFromNotification = async function (weekEndDate, shiftDate) {
   try {
+    await syncFromNativeDiskIfUpdated();
+
     // Dismiss toast banner if visible
     const toast = document.getElementById('newTimecardToast');
     if (toast) toast.classList.add('hidden');
+
+    if (shiftDate && String(shiftDate).startsWith('opt_')) {
+      const tabTimeOffBtn = document.getElementById('tabTimeOff');
+      if (tabTimeOffBtn) tabTimeOffBtn.click();
+      return;
+    }
 
     // Switch to Time Card Viewer tab
     const tabTimeCardBtn = document.getElementById('tabTimeCard');
@@ -494,7 +554,7 @@ window.focusShiftFromNotification = async function (weekEndDate, shiftDate) {
       if (select) {
         select.value = targetWeek;
       }
-      await loadWeekDetails(targetWeek, true);
+      await loadWeekDetails(targetWeek, true, true);
     }
 
     if (shiftDate && currentWeekData) {
@@ -519,119 +579,134 @@ window.focusShiftFromNotification = async function (weekEndDate, shiftDate) {
   }
 };
 
-function notifyDailyTimecardAdded(newTimecards, fallbackWeekEndDate = '') {
-  if (!Array.isArray(newTimecards) || newTimecards.length === 0) return;
+function notifySyncCycleAlerts({
+  newTimecards = [],
+  newAudits = [],
+  optionDayAlerts = [],
+  fallbackWeekEndDate = ''
+} = {}) {
+  const segments = [];
 
-  // Notify strictly on completed shifts or Option Day usage (never on clock-in-only open punches or VACATION - EMPLOYEE PREPAID)
-  const freshItems = newTimecards.filter(
-    tc => tc && tc.date && !isExcludedAlertShift(tc) && !notifiedShiftDates.has(tc.date) && (isCompletedWorkedShift(tc) || isOptionDayShift(tc))
-  );
-  if (freshItems.length === 0) return;
+  // 1. Completed shifts or daily Option Day rows (excluding incomplete punches & VACATION - EMPLOYEE PREPAID)
+  const freshItems = Array.isArray(newTimecards)
+    ? newTimecards.filter(
+        tc => tc && tc.date && !isExcludedAlertShift(tc) && !notifiedShiftDates.has(tc.date) && (isCompletedWorkedShift(tc) || isOptionDayShift(tc))
+      )
+    : [];
 
-  freshItems.forEach(tc => notifiedShiftDates.add(tc.date));
+  if (freshItems.length > 0) {
+    freshItems.forEach(tc => notifiedShiftDates.add(tc.date));
+    const latestItem = freshItems[freshItems.length - 1];
+    const targetWeekEnd = latestItem.week_end_date || fallbackWeekEndDate || (currentWeekData ? currentWeekData.week_end_date : '');
+    const targetShiftDate = latestItem.date || '';
 
-  const latestItem = freshItems[freshItems.length - 1];
-  const targetWeekEnd = latestItem.week_end_date || fallbackWeekEndDate || (currentWeekData ? currentWeekData.week_end_date : '');
-  const targetShiftDate = latestItem.date || '';
-  latestNotifiedTarget = { weekEndDate: targetWeekEnd, shiftDate: targetShiftDate };
+    const lines = freshItems.map(tc => {
+      const label = formatShiftDate(tc.date, tc.day_name || '');
+      const isOpt = isOptionDayShift(tc);
+      const punches = isOpt
+        ? (tc.pay_code || 'OPTION DAY')
+        : `${tc.start_time_clock} – ${tc.end_time_clock}`;
+      const hrs = formatDecimal(tc.total_hours || 0);
+      const pay = formatCurrency(tc.gross_pay || 0);
+      return `${label}: ${punches} (${hrs} hrs • ${pay})`;
+    });
 
-  const lines = freshItems.map(tc => {
-    const label = formatShiftDate(tc.date, tc.day_name || '');
-    const isOpt = isOptionDayShift(tc);
-    const punches = isOpt
-      ? (tc.pay_code || 'OPTION DAY')
-      : `${tc.start_time_clock} – ${tc.end_time_clock}`;
-    const hrs = formatDecimal(tc.total_hours || 0);
-    const pay = formatCurrency(tc.gross_pay || 0);
-    return `${label}: ${punches} (${hrs} hrs • ${pay})`;
-  });
+    const singleIsOpt = freshItems.length === 1 && isOptionDayShift(freshItems[0]);
+    const title = freshItems.length === 1
+      ? (singleIsOpt
+        ? `Option Day Used (${formatShiftDate(freshItems[0].date, freshItems[0].day_name || '')})`
+        : `New Timecard Added (${formatShiftDate(freshItems[0].date, freshItems[0].day_name || '')})`)
+      : `${freshItems.length} New Daily Timecards Added`;
 
-  const singleIsOpt = freshItems.length === 1 && isOptionDayShift(freshItems[0]);
-  const title = freshItems.length === 1
-    ? (singleIsOpt
-      ? `Option Day Used (${formatShiftDate(freshItems[0].date, freshItems[0].day_name || '')})`
-      : `New Timecard Added (${formatShiftDate(freshItems[0].date, freshItems[0].day_name || '')})`)
-    : `${freshItems.length} New Daily Timecards Added`;
-  const body = lines.join(' | ');
-
-  // 1. Show In-App Notification Banner
-  const toast = document.getElementById('newTimecardToast');
-  const toastTitle = document.getElementById('newTimecardToastTitle');
-  const toastBody = document.getElementById('newTimecardToastBody');
-  if (toast && toastTitle && toastBody) {
-    toastTitle.textContent = title;
-    toastBody.textContent = body;
-    toast.classList.remove('hidden');
+    segments.push({
+      title,
+      body: lines.join(' | '),
+      weekEndDate: targetWeekEnd,
+      shiftDate: targetShiftDate
+    });
   }
 
-  // 2. Native Android Status Bar Notification (with deep-link weekEndDate + shiftDate extras)
-  try {
-    if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.showTimecardNotificationForShift) {
-      window.AndroidNative.showTimecardNotificationForShift(title, body, targetWeekEnd, targetShiftDate);
-    }
-  } catch (e) {}
+  // 2. Option Day / Option Week entitlement bank drops (when not already covered by a daily Option Day row)
+  const hasDailyOptAlert = freshItems.some(tc => isOptionDayShift(tc))
+    || (Array.isArray(newTimecards) && newTimecards.some(tc => isOptionDayShift(tc)));
 
-  // 3. Desktop / Web Browser OS Notification (with click deep-link)
-  try {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      const n = new Notification(title, { body: body });
-      n.onclick = () => {
-        try { window.focus(); } catch (e) {}
-        window.focusShiftFromNotification(targetWeekEnd, targetShiftDate);
-      };
+  if (Array.isArray(optionDayAlerts) && optionDayAlerts.length > 0) {
+    const freshOptDrops = optionDayAlerts.filter(opt => {
+      if (!opt || isExcludedAlertShift(opt)) return false;
+      const tType = String(opt.timeoff_type || 'OPT').trim().toUpperCase();
+      const sig = `${tType}|${formatDecimal(opt.old_available)}->${formatDecimal(opt.new_available)}`;
+      if (notifiedOptionBankSignatures.has(sig)) return false;
+      notifiedOptionBankSignatures.add(sig);
+      return true;
+    });
+
+    if (!hasDailyOptAlert && freshOptDrops.length > 0) {
+      const optAlert = freshOptDrops[0];
+      const optType = String(optAlert.timeoff_type || 'OPT').trim().toUpperCase();
+      const optTitle = `${optAlert.title || 'Option Day'} Used`;
+      const optBody = `${optAlert.title || 'Option Day'} balance decreased: ${formatDecimal(optAlert.old_available)} → ${formatDecimal(optAlert.new_available)} ${optAlert.time_basis || 'Days'} remaining`;
+      segments.push({
+        title: optTitle,
+        body: optBody,
+        weekEndDate: '',
+        shiftDate: `opt_${optType}`
+      });
     }
-  } catch (e) {}
+  }
+
+  // 3. Supervisor Punch Modifications
+  const freshAudits = Array.isArray(newAudits)
+    ? newAudits.filter(a => {
+        if (!a || !a.date || !a.field_name) return false;
+        if (isExcludedAlertShift(a)) return false;
+        const sig = `${a.week_end_date || ''}|${a.date}|${a.field_name}|${a.old_value || ''}|${a.new_value || ''}`;
+        if (notifiedAuditSignatures.has(sig)) return false;
+        notifiedAuditSignatures.add(sig);
+        return true;
+      })
+    : [];
+
+  if (freshAudits.length > 0) {
+    const latest = freshAudits[freshAudits.length - 1];
+    const targetWeekEnd = latest.week_end_date || fallbackWeekEndDate || (currentWeekData ? currentWeekData.week_end_date : '');
+    const targetShiftDate = latest.date || '';
+    const title = freshAudits.length === 1
+      ? `Punch Modification Detected (${latest.date})`
+      : `${freshAudits.length} Punch Modifications Detected`;
+    const body = freshAudits
+      .map(a => `${a.date} ${a.field_name}: ${a.old_value || ''} → ${a.new_value || ''}`)
+      .join(' | ');
+    segments.push({
+      title,
+      body,
+      weekEndDate: targetWeekEnd,
+      shiftDate: targetShiftDate
+    });
+  }
+
+  if (segments.length === 0) return false;
+
+  const primary = segments[0];
+  if (segments.length === 1) {
+    dispatchSystemNotification(primary.title, primary.body, primary.weekEndDate, primary.shiftDate);
+    return true;
+  }
+
+  const sameDate = !!primary.shiftDate && segments.every(s => s.shiftDate === primary.shiftDate);
+  const combinedTitle = sameDate
+    ? `Timecard & Punch Update (${primary.shiftDate})`
+    : `${primary.title} + ${segments.length - 1} More Update${segments.length > 2 ? 's' : ''}`;
+  const combinedBody = segments.map(s => s.body).join(' | ');
+  dispatchSystemNotification(combinedTitle, combinedBody, primary.weekEndDate, primary.shiftDate);
+  return true;
+}
+
+function notifyDailyTimecardAdded(newTimecards, fallbackWeekEndDate = '') {
+  return notifySyncCycleAlerts({ newTimecards, fallbackWeekEndDate });
 }
 
 function notifyPunchAuditsDetected(newAudits, fallbackWeekEndDate = '') {
-  if (!Array.isArray(newAudits) || newAudits.length === 0) return;
-
-  const freshAudits = newAudits.filter(a => {
-    if (!a || !a.date || !a.field_name) return false;
-    if (isExcludedAlertShift(a)) return false;
-    const sig = `${a.week_end_date || ''}|${a.date}|${a.field_name}|${a.old_value || ''}|${a.new_value || ''}`;
-    if (notifiedAuditSignatures.has(sig)) return false;
-    notifiedAuditSignatures.add(sig);
-    return true;
-  });
-  if (freshAudits.length === 0) return;
-
-  const latest = freshAudits[freshAudits.length - 1];
-  const targetWeekEnd = latest.week_end_date || fallbackWeekEndDate || (currentWeekData ? currentWeekData.week_end_date : '');
-  const targetShiftDate = latest.date || '';
-  latestNotifiedTarget = { weekEndDate: targetWeekEnd, shiftDate: targetShiftDate };
-
-  const title = freshAudits.length === 1
-    ? `Punch Modification Detected (${latest.date})`
-    : `${freshAudits.length} Punch Modifications Detected`;
-  const body = freshAudits
-    .map(a => `${a.date} ${a.field_name}: ${a.old_value || ''} → ${a.new_value || ''}`)
-    .join(' | ');
-
-  const toast = document.getElementById('newTimecardToast');
-  const toastTitle = document.getElementById('newTimecardToastTitle');
-  const toastBody = document.getElementById('newTimecardToastBody');
-  if (toast && toastTitle && toastBody) {
-    toastTitle.textContent = title;
-    toastBody.textContent = body;
-    toast.classList.remove('hidden');
-  }
-
-  try {
-    if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.showTimecardNotificationForShift) {
-      window.AndroidNative.showTimecardNotificationForShift(title, body, targetWeekEnd, targetShiftDate);
-    }
-  } catch (e) {}
-
-  try {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      const n = new Notification(title, { body: body });
-      n.onclick = () => {
-        try { window.focus(); } catch (e) {}
-        window.focusShiftFromNotification(targetWeekEnd, targetShiftDate);
-      };
-    }
-  } catch (e) {}
+  return notifySyncCycleAlerts({ newAudits, fallbackWeekEndDate });
 }
 
 // Load details for a selected week (Instant 0ms from cache, or fetch)
@@ -1267,6 +1342,7 @@ async function logoutUser() {
       knownWorkedDaysByWeek.clear();
       notifiedShiftDates.clear();
       notifiedAuditSignatures.clear();
+      notifiedOptionBankSignatures.clear();
       expandedRows.clear();
       currentWeekData = null;
       const banner = document.getElementById('statusBanner');
@@ -1360,6 +1436,8 @@ async function triggerSync(headless = true, maxWeeks = 0, syncTimeoff = true, si
 
 // Check Sync Status & Update Progression Bar
 async function checkSyncStatus() {
+  if (isCheckingSyncStatus) return;
+  isCheckingSyncStatus = true;
   try {
     if (syncPollStartedAt > 0 && (Date.now() - syncPollStartedAt) > 220000) {
       if (window.TimecardBridge && typeof window.TimecardBridge.finishSync === 'function') {
@@ -1426,36 +1504,11 @@ async function checkSyncStatus() {
         }
       }
 
-      const hasDailyOptAlert = Array.isArray(data.new_timecards) && data.new_timecards.some(tc => isOptionDayShift(tc));
-      if (Array.isArray(data.new_timecards) && data.new_timecards.length > 0) {
-        notifyDailyTimecardAdded(data.new_timecards);
-      }
-      if (Array.isArray(data.new_audits) && data.new_audits.length > 0) {
-        notifyPunchAuditsDetected(data.new_audits);
-      }
-      if (!hasDailyOptAlert && Array.isArray(data.option_day_alerts) && data.option_day_alerts.length > 0) {
-        const optAlert = data.option_day_alerts[0];
-        const optTitle = `${optAlert.title || 'Option Day'} Used`;
-        const optBody = `${optAlert.title || 'Option Day'} balance decreased: ${formatDecimal(optAlert.old_available)} → ${formatDecimal(optAlert.new_available)} ${optAlert.time_basis || 'Days'} remaining`;
-        const toast = document.getElementById('newTimecardToast');
-        const toastTitle = document.getElementById('newTimecardToastTitle');
-        const toastBody = document.getElementById('newTimecardToastBody');
-        if (toast && toastTitle && toastBody) {
-          toastTitle.textContent = optTitle;
-          toastBody.textContent = optBody;
-          toast.classList.remove('hidden');
-        }
-        try {
-          if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.showTimecardNotificationForShift) {
-            window.AndroidNative.showTimecardNotificationForShift(optTitle, optBody, '', '');
-          }
-        } catch (e) {}
-        try {
-          if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification(optTitle, { body: optBody });
-          }
-        } catch (e) {}
-      }
+      const didNotifyInSync = notifySyncCycleAlerts({
+        newTimecards: data.new_timecards,
+        newAudits: data.new_audits,
+        optionDayAlerts: data.option_day_alerts
+      });
 
       weekDetailsCache.clear();
       if (!wasSilent) {
@@ -1463,9 +1516,9 @@ async function checkSyncStatus() {
       }
       await checkAuthStatus();
       await Promise.all([
-        loadWeeks(currentWeekData ? currentWeekData.week_end_date : null),
+        loadWeeks(currentWeekData ? currentWeekData.week_end_date : null, didNotifyInSync),
         loadTimeOff(),
-        loadAuditHistory()
+        loadAuditHistory(didNotifyInSync)
       ]);
       // Silently ensure permanent local vault and MongoDB Cloud Vault are synchronized
       try {
@@ -1478,6 +1531,8 @@ async function checkSyncStatus() {
     }
   } catch (err) {
     console.error('Failed to poll status:', err);
+  } finally {
+    isCheckingSyncStatus = false;
   }
 }
 

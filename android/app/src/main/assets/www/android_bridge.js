@@ -23,8 +23,24 @@
     message: '',
     requires_login: false,
     new_timecards: [],
+    new_audits: [],
+    option_day_alerts: [],
     latest_log: null
   };
+
+  let lastLoadedStoreMtime = (
+    typeof window.AndroidNative !== 'undefined' &&
+    typeof window.AndroidNative.getStoreLastModified === 'function'
+  ) ? Number(window.AndroidNative.getStoreLastModified()) || 0 : 0;
+
+  function syncStoreMtimeFromNative() {
+    try {
+      if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.getStoreLastModified === 'function') {
+        const m = Number(window.AndroidNative.getStoreLastModified()) || 0;
+        if (m > 0) lastLoadedStoreMtime = m;
+      }
+    } catch (e) {}
+  }
 
   function getEmptyDatabase() {
     return {
@@ -38,7 +54,28 @@
   }
 
   function loadDatabase() {
-    if (cachedDb) return cachedDb;
+    if (cachedDb) {
+      // Ensure foreground WebView never diffs against stale memory when TimecardSyncJobService wrote newer data to disk
+      try {
+        if (typeof window.AndroidNative !== 'undefined'
+            && typeof window.AndroidNative.getStoreLastModified === 'function'
+            && typeof window.AndroidNative.loadStateJson === 'function') {
+          const diskMtime = Number(window.AndroidNative.getStoreLastModified()) || 0;
+          if (diskMtime > 0 && diskMtime > lastLoadedStoreMtime) {
+            const diskRaw = window.AndroidNative.loadStateJson();
+            if (diskRaw && diskRaw.trim()) {
+              const diskParsed = JSON.parse(diskRaw);
+              if (diskParsed && Array.isArray(diskParsed.weeks)) {
+                cachedDb = diskParsed;
+                lastLoadedStoreMtime = diskMtime;
+                try { localStorage.setItem(STORAGE_KEY, diskRaw); } catch (e2) {}
+              }
+            }
+          }
+        }
+      } catch (e) {}
+      return cachedDb;
+    }
     try {
       let raw = null;
       if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.loadStateJson) {
@@ -51,6 +88,7 @@
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.weeks)) {
           cachedDb = parsed;
+          syncStoreMtimeFromNative();
           return cachedDb;
         }
       }
@@ -74,6 +112,7 @@
       localStorage.setItem(STORAGE_KEY, serialized);
       if (typeof window.AndroidNative !== 'undefined' && window.AndroidNative.saveStateJson) {
         window.AndroidNative.saveStateJson(serialized);
+        syncStoreMtimeFromNative();
       }
     } catch (e) {
       console.error('Failed to save on-device store:', e);
@@ -684,20 +723,6 @@
       db.timeoff.entitlements = parsedTimeoff.entitlements;
     }
     saveDatabase(db);
-  }
-
-  let lastLoadedStoreMtime = (
-    typeof window.AndroidNative !== 'undefined' &&
-    typeof window.AndroidNative.getStoreLastModified === 'function'
-  ) ? Number(window.AndroidNative.getStoreLastModified()) || 0 : 0;
-
-  function syncStoreMtimeFromNative() {
-    try {
-      if (typeof window.AndroidNative !== 'undefined' && typeof window.AndroidNative.getStoreLastModified === 'function') {
-        const m = Number(window.AndroidNative.getStoreLastModified()) || 0;
-        if (m > 0) lastLoadedStoreMtime = m;
-      }
-    } catch (e) {}
   }
 
   // Expose callbacks for Android MainActivity WebView scraper & closed-app TimecardSyncJobService

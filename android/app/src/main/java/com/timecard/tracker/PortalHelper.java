@@ -7,6 +7,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
@@ -30,9 +31,12 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * Shared portal URL resolution, synchronized atomic disk storage, WebView asset/auth helpers,
@@ -52,7 +56,15 @@ final class PortalHelper {
     static final String PREF_LAST_PAGE_FINGERPRINT = "last_page_fingerprint_v1";
     static final String PREF_LAST_TIMEOFF_SYNC_MS = "last_timeoff_bg_sync_ms";
     static final String PREF_LAST_TIMEOFF_FINGERPRINT = "last_timeoff_fingerprint_v1";
+    static final String PREF_LAST_ROLLOVER_SYNC_MS = "last_rollover_bg_sync_ms";
     static final String PREF_AUTH_SESSION_EXPIRED = "auth_session_expired_v1";
+    static final String PREF_NOTIFIED_SIGNATURES = "notified_shift_signatures_v2";
+    static final String PREF_LAST_NOTIF_KEY = "last_notif_dedup_key_v1";
+    static final String PREF_LAST_NOTIF_BODY_HASH = "last_notif_body_hash_v1";
+    static final String PREF_LAST_NOTIF_MS = "last_notif_dedup_ms_v1";
+    static final int MAX_NOTIFIED_SIGNATURES = 400;
+    private static final long CROSS_CALLER_NOTIF_DEDUP_MS = 90_000L;
+    private static final long IDENTICAL_PAYLOAD_DEDUP_MS = 10 * 60 * 1000L;
 
     static final String EXTRA_WEEK_END_DATE = "EXTRA_WEEK_END_DATE";
     static final String EXTRA_SHIFT_DATE = "EXTRA_SHIFT_DATE";
@@ -65,6 +77,7 @@ final class PortalHelper {
             "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 
     private static final Object FILE_LOCK = new Object();
+    private static final Object NOTIF_LOCK = new Object();
 
     private PortalHelper() {}
 
@@ -169,11 +182,11 @@ final class PortalHelper {
 
     /**
      * Returns true ONLY when the URL path itself targets Time Card Viewer or Time Off Viewer (or about:blank).
-     * Never matches /welcome.html, /login, id.ups.com, or SSO URLs that merely carry time-card-viewer in query params.
+     * Never matches /welcome.html, /login, federated SSO hosts, or SSO URLs that merely carry viewer paths in query params.
      */
     static boolean isTimecardOrTimeoffViewerUrl(String url) {
         if (url == null || url.trim().isEmpty()) return true;
-        String lower = url.trim().toLowerCase();
+        String lower = url.trim().toLowerCase(Locale.US);
         if ("about:blank".equals(lower)) return true;
 
         int qIdx = lower.indexOf('?');
@@ -186,16 +199,22 @@ final class PortalHelper {
         if (withoutQuery.contains("microsoftonline.com")
                 || withoutQuery.contains("login.live.com")
                 || withoutQuery.contains("login.windows.net")
-                || withoutQuery.contains("id.ups.com")
-                || withoutQuery.contains("fed.ups.com")) {
+                || withoutQuery.contains("/oauth")
+                || withoutQuery.contains("/saml")
+                || withoutQuery.contains("/idp/")) {
             return false;
         }
 
         String pathOnly = withoutQuery;
+        int schemeIdx = withoutQuery.indexOf("://");
+        if (schemeIdx >= 0) {
+            int slashIdx = withoutQuery.indexOf('/', schemeIdx + 3);
+            pathOnly = slashIdx >= 0 ? withoutQuery.substring(slashIdx) : "/";
+        }
         try {
             Uri parsed = Uri.parse(url.trim());
             if (parsed.getPath() != null && !parsed.getPath().isEmpty()) {
-                pathOnly = parsed.getPath().toLowerCase();
+                pathOnly = parsed.getPath().toLowerCase(Locale.US);
             }
         } catch (Exception ignored) {}
 
@@ -407,7 +426,36 @@ final class PortalHelper {
         } catch (Exception ignored) {}
     }
 
-    /** Posts a native Android notification that deep-links into MainActivity for the given shift. */
+    /** Reads the shared set of notified shift/audit/Option Day signatures under NOTIF_LOCK. */
+    static Set<String> getNotifiedSignatures(Context context) {
+        synchronized (NOTIF_LOCK) {
+            try {
+                SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                Set<String> stored = prefs.getStringSet(PREF_NOTIFIED_SIGNATURES, Collections.emptySet());
+                return stored != null ? new HashSet<>(stored) : new HashSet<>();
+            } catch (Exception ignored) {
+                return new HashSet<>();
+            }
+        }
+    }
+
+    /** Persists the shared set of notified shift/audit/Option Day signatures under NOTIF_LOCK. */
+    static void saveNotifiedSignatures(Context context, Set<String> signatures) {
+        if (signatures == null) return;
+        synchronized (NOTIF_LOCK) {
+            try {
+                SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, new HashSet<>(signatures)).apply();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * Posts a native Android notification that deep-links into MainActivity for the given shift.
+     * Keys notifId deterministically by weekEndDate|shiftDate so foreground & background updates for
+     * the same shift date replace in-place rather than stacking duplicate notifications, and enforces
+     * a shared cross-component deduplication guard across MainActivity and TimecardSyncJobService.
+     */
     static void postShiftNotification(Context context, String title, String body, String weekEndDate, String shiftDate) {
         try {
             setupNotificationChannel(context);
@@ -419,21 +467,77 @@ final class PortalHelper {
 
             String safeTitle = (title != null && !title.trim().isEmpty()) ? title.trim() : "New Timecard Added";
             String safeBody = (body != null && !body.trim().isEmpty()) ? body.trim() : "A new daily timecard has been posted.";
-            String keySeed = ((weekEndDate != null ? weekEndDate.trim() : "") + "|"
-                    + (shiftDate != null ? shiftDate.trim() : "") + "|"
-                    + safeTitle);
-            int notifId = !keySeed.equals("||New Timecard Added")
-                    ? (keySeed.hashCode() & 0x7fffffff)
-                    : (int) (System.currentTimeMillis() & 0x7fffffff);
+            String normWeek = weekEndDate != null ? weekEndDate.trim() : "";
+            String normShift = shiftDate != null ? shiftDate.trim() : "";
+
+            String upperTitle = safeTitle.toUpperCase(Locale.US);
+            String category;
+            if (upperTitle.contains("TIMECARD & PUNCH") || upperTitle.contains("MORE UPDATE")) {
+                category = "combined";
+            } else if (upperTitle.contains("PUNCH") || upperTitle.contains("MODIFICATION")) {
+                category = "punch";
+            } else if (upperTitle.contains("OPTION")) {
+                category = "option_day";
+            } else {
+                category = "complete";
+            }
+
+            synchronized (NOTIF_LOCK) {
+                SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                long now = System.currentTimeMillis();
+                long lastMs = prefs.getLong(PREF_LAST_NOTIF_MS, 0L);
+                String lastKey = prefs.getString(PREF_LAST_NOTIF_KEY, "");
+                String lastBodyHash = prefs.getString(PREF_LAST_NOTIF_BODY_HASH, "");
+
+                String dedupKey = (!normShift.isEmpty() || !normWeek.isEmpty())
+                        ? (normWeek + "|" + normShift + "|" + category)
+                        : (safeTitle + "|" + safeBody);
+                String bodyHash = String.valueOf((safeTitle + "|" + safeBody).hashCode());
+
+                long elapsed = now - lastMs;
+                if (elapsed >= 0L) {
+                    if (dedupKey.equals(lastKey) && elapsed < CROSS_CALLER_NOTIF_DEDUP_MS) {
+                        return;
+                    }
+                    if (bodyHash.equals(lastBodyHash) && elapsed < IDENTICAL_PAYLOAD_DEDUP_MS) {
+                        return;
+                    }
+                }
+
+                Set<String> sigs = new HashSet<>(prefs.getStringSet(PREF_NOTIFIED_SIGNATURES, Collections.emptySet()));
+                boolean sigAdded = false;
+                if (normShift.length() == 10 && normShift.charAt(4) == '-' && normShift.charAt(7) == '-') {
+                    if ("option_day".equals(category)) {
+                        sigAdded = sigs.add(normShift + "|option_day");
+                    } else if ("complete".equals(category) || "combined".equals(category)) {
+                        sigAdded = sigs.add(normShift + "|complete");
+                    }
+                }
+
+                SharedPreferences.Editor editor = prefs.edit()
+                        .putString(PREF_LAST_NOTIF_KEY, dedupKey)
+                        .putString(PREF_LAST_NOTIF_BODY_HASH, bodyHash)
+                        .putLong(PREF_LAST_NOTIF_MS, now);
+                if (sigAdded && sigs.size() <= MAX_NOTIFIED_SIGNATURES) {
+                    editor.putStringSet(PREF_NOTIFIED_SIGNATURES, sigs);
+                }
+                editor.apply();
+            }
+
+            String idSeed = !normShift.isEmpty()
+                    ? (normWeek + "|" + normShift)
+                    : (!normWeek.isEmpty() ? normWeek : "timecard_general_alert");
+            int notifId = idSeed.hashCode() & 0x7fffffff;
+            if (notifId == 0) notifId = 1;
 
             Intent intent = new Intent(context, MainActivity.class);
             intent.setAction("com.timecard.tracker.ACTION_FOCUS_SHIFT_" + notifId);
             intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            if (weekEndDate != null && !weekEndDate.isEmpty()) {
-                intent.putExtra(EXTRA_WEEK_END_DATE, weekEndDate);
+            if (!normWeek.isEmpty()) {
+                intent.putExtra(EXTRA_WEEK_END_DATE, normWeek);
             }
-            if (shiftDate != null && !shiftDate.isEmpty()) {
-                intent.putExtra(EXTRA_SHIFT_DATE, shiftDate);
+            if (!normShift.isEmpty()) {
+                intent.putExtra(EXTRA_SHIFT_DATE, normShift);
             }
             int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
             PendingIntent pendingIntent = PendingIntent.getActivity(context, notifId, intent, flags);
@@ -577,17 +681,24 @@ final class PortalHelper {
         }
     }
 
-    /** Clears cached background sync timestamps and page fingerprints cleanly on logout. */
+    /** Clears cached background sync timestamps, fingerprints, and notification dedup state cleanly on logout. */
     static void clearBackgroundSyncPrefs(Context context) {
-        try {
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .remove(PREF_LAST_BG_SYNC_MS)
-                    .remove(PREF_LAST_PAGE_FINGERPRINT)
-                    .remove(PREF_LAST_TIMEOFF_SYNC_MS)
-                    .remove(PREF_LAST_TIMEOFF_FINGERPRINT)
-                    .apply();
-        } catch (Exception ignored) {}
+        synchronized (NOTIF_LOCK) {
+            try {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .remove(PREF_LAST_BG_SYNC_MS)
+                        .remove(PREF_LAST_PAGE_FINGERPRINT)
+                        .remove(PREF_LAST_TIMEOFF_SYNC_MS)
+                        .remove(PREF_LAST_TIMEOFF_FINGERPRINT)
+                        .remove(PREF_LAST_ROLLOVER_SYNC_MS)
+                        .remove(PREF_NOTIFIED_SIGNATURES)
+                        .remove(PREF_LAST_NOTIF_KEY)
+                        .remove(PREF_LAST_NOTIF_BODY_HASH)
+                        .remove(PREF_LAST_NOTIF_MS)
+                        .apply();
+            } catch (Exception ignored) {}
+        }
     }
 
     /** Returns true if Android battery optimization is disabled ("Unrestricted") for this app. */

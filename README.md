@@ -1,5 +1,5 @@
 # TvC - Timecard Viewer 🕒📋🌴
-**Version 2.5.2 (Build 2026112502)**
+**Version 2.5.3 (Build 2026112601)**
 
 A fast, private, personal web dashboard and standalone Android application for tracking and auditing timecards, punch modifications, audit histories, and leave entitlements. Built with Python, FastAPI, SQLite, MongoDB Atlas cloud vault, Tailwind CSS, and Playwright for automated background sync.
 
@@ -64,14 +64,19 @@ Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 - **Sync All Weeks**: Initial login automatically syncs your full multi-week history and leave bank.
 - **Current Week Sync**: Click **"Sync"** in the header to quickly refresh only the current pending week.
 
-### 3. Standalone Android App, Auto-OTA & 1-Tap Native APK Updates 📱
+### 3. Standalone Android App, SHA-256 Verified Auto-OTA & 1-Tap Native APK Updates 📱
 - **100% Standalone On-Phone Operation**: Runs natively without a background server (`com.timecard.tracker`).
-- **Seamless OTA + 1-Tap Native APK Self-Updater**:
-  - **Web UI & Parser Updates (`ota_bundle.zip`)**: Automatically download from GitHub and apply immediately on launch.
-  - **Native Android Updates (`Timecard-Tracker.apk`)**: Whenever background sync or native Java code is updated, the app displays a **1-Tap "Install APK Update"** prompt that downloads `Timecard-Tracker.apk` directly from GitHub and launches the native Android installer inside the app.
-- **Build & Package Both OTA Bundle and Standalone APK in One Command**:
+- **SHA-256 Verified OTA + 1-Tap Native APK Self-Updater**:
+  - **Web UI & Parser Updates (`ota_bundle.zip`)**: Automatically download from GitHub (`raw.githubusercontent.com`, GitHub Releases `releases/latest/download/...`, and `jsDelivr` CDN failover), verify cryptographic **SHA-256 (`ota_sha256`)** & ZipSlip/size bounds before extraction, and apply silently without triggering APK reinstall prompts.
+  - **Native Android Updates (`Timecard-Tracker.apk`)**: Whenever background sync or native Java code is updated (`--build-apk`), the app displays a single **1-Tap "Install APK Update"** prompt, verifies **SHA-256 (`apk_sha256`)** on the downloaded APK (deleting any corrupted/tampered file immediately on mismatch), and launches Android's `PackageInstaller`.
+  - **Automated GitHub Releases (`.github/workflows/release.yml`)**: Pushing an updated `version.json` to `main` automatically publishes/updates the `latest` GitHub Release (`v<version>-<build>`) with `ota_bundle.zip` and `Timecard-Tracker.apk` attached.
+- **Package Web-Only OTA Update (Preserves Native APK Build)**:
   ```powershell
-  python run.py --pack-ota
+  python run.py --pack-ota --notes "UI & parser improvements"
+  ```
+- **Build & Package Both OTA Bundle and Standalone Native APK**:
+  ```powershell
+  python run.py --pack-ota --build-apk --ver 2.5.3 --notes "Native + web update"
   ```
 - **Push Live Update to GitHub & Purge CDN Cache**:
   ```powershell

@@ -1,12 +1,12 @@
 {
-  "version": "2.5.2",
-  "build": 2026112502,
+  "version": "2.5.3",
+  "build": 2026112601,
   "min_apk_version": 1,
-  "release_notes": "Fix login & sync hang (accurate SSO/portal state detection without DOM visibility breakage)",
+  "release_notes": "Single consolidated notifications (fix double alerts), SHA-256 OTA/APK verification, and full codebase audit",
   "github_repo": "solotreason/TvC",
   "ota_bundle_url": "https://raw.githubusercontent.com/solotreason/TvC/main/static/ota_bundle.zip",
   "apk_url": "https://raw.githubusercontent.com/solotreason/TvC/main/Timecard-Tracker.apk",
-  "apk_build": 2026112502,
+  "apk_build": 2026112601,
   "ota_sha256": "dcb7cffbb960005f99875b7d38e5602299923d275ad9d5f835d477b1fafa45cd",
   "apk_sha256": "e66d402d433b2d581c775ad78e0ebb76c223a8566d4842fb94d75b1402795276"
 }

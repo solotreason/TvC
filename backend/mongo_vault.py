@@ -4,12 +4,18 @@ Provides seamless cloud sync for multi-user historical timecard archives,
 ensuring past months and years are permanently preserved across phone switches (Android <-> iPhone).
 """
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 _client = None
 _client_lock = threading.Lock()
+
+
+def _sanitize_error(err: Any) -> str:
+    """Redacts any embedded MongoDB credentials from error messages."""
+    return re.sub(r"(mongodb(?:\+srv)?://)[^@\s]+@", r"\1***@", str(err))
 
 def _load_env_file():
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -62,7 +68,7 @@ def get_mongo_client():
                 pass
             return _client
         except Exception as e:
-            print(f"[MongoDB] Could not initialize client: {e}")
+            print(f"[MongoDB] Could not initialize client: {_sanitize_error(e)}")
             return None
 
 
@@ -93,7 +99,8 @@ def sync_cloud_archive(
         }
 
     try:
-        db = client[DB_NAME]
+        db_name = os.environ.get("MONGODB_DB_NAME", DB_NAME)
+        db = client[db_name]
         coll = db[COLLECTION_NAME]
 
         # 1. Fetch existing cloud record for this employee
@@ -173,10 +180,11 @@ def sync_cloud_archive(
             "corrections": merged_corrs
         }
     except Exception as e:
-        print(f"[MongoDB] Cloud sync warning: {e}")
+        clean_err = _sanitize_error(e)
+        print(f"[MongoDB] Cloud sync warning: {clean_err}")
         return {
             "success": False,
-            "error": str(e),
+            "error": clean_err,
             "archived_weeks": local_archived_weeks,
             "week_details": local_week_details,
             "audit_logs": local_audit_logs or [],
@@ -192,13 +200,14 @@ def fetch_cloud_archive(emp_id: str) -> Optional[Dict[str, Any]]:
     if client is None:
         return None
     try:
-        db = client[DB_NAME]
+        db_name = os.environ.get("MONGODB_DB_NAME", DB_NAME)
+        db = client[db_name]
         coll = db[COLLECTION_NAME]
         doc = coll.find_one({"emp_id": emp_id})
         if doc:
             doc.pop("_id", None)
             return doc
     except Exception as e:
-        print(f"[MongoDB] Fetch error: {e}")
+        print(f"[MongoDB] Fetch error: {_sanitize_error(e)}")
     return None
 

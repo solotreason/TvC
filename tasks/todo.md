@@ -2,7 +2,23 @@
 
 ## Status & Phases
 
-### Current Sprint: Complete Alerts (Timecards, Punch Audits & Option Days), Exclude Prepaid Vacation & Clean Archive Header (v2.4.9)
+### Current Sprint: Single Consolidated Notifications, SHA-256 OTA/APK Verification & Full Codebase Audit (v2.5.3)
+
+- [x] 1. **Single Consolidated Notification Guarantee (`PortalHelper.java`, `TimecardSyncJobService.java`, `static/app.js`, `static/android_bridge.js`)**:
+  - Made Android native (`AndroidNative.showTimecardNotificationForShift`) and web browser (`new Notification`) dispatch strictly mutually exclusive in `dispatchSystemNotification`.
+  - Consolidated newly posted completed timecards, Option Day rows/bank drops, and punch modifications into **at most one** notification per sync cycle across both closed-app `TimecardSyncJobService.notifyForChanges` and foreground `notifySyncCycleAlerts` (`checkSyncStatus` + `loadWeekDetails` suppression).
+  - Keyed `PortalHelper.postShiftNotification` `notifId` deterministically by `weekEndDate|shiftDate`, synchronized `PREF_NOTIFIED_SIGNATURES` + cross-caller dedup guard under `NOTIF_LOCK`, and refreshed `cachedDb` automatically when `getStoreLastModified()` advances.
+
+- [x] 2. **OTA/APK Single-Prompt Deduplication, Cryptographic SHA-256 Verification & GitHub Releases (`MainActivity.java`, `run.py`, `.github/workflows/release.yml`)**:
+  - Updated `run.py --pack-ota` to preserve `apk_build` / `apk_sha256` on web-only updates and only bump/compile `Timecard-Tracker.apk` when `--build-apk` is specified; suppressed overlapping OTA Toast + APK banner prompts in `MainActivity.performOtaCheckAndDownload`.
+  - Enforced fail-closed `SHA-256` verification (`ota_sha256` and `apk_sha256`) before unzipping `ota_temp.zip` and before launching `PackageInstaller` on `Timecard-Tracker-update.apk`, immediately deleting any corrupted or mismatched file, plus ZipSlip + Zip-bomb bounds and strict WebView origin lockdown.
+  - Added `.github/workflows/release.yml` to automatically validate SHA-256 digests and publish/update the `latest` GitHub Release (`v<version>-<build>`) whenever `version.json` is pushed to `main`.
+
+- [x] 3. **Full Backend Audit, SQLite Connection Safety & Regression Suite (`backend/*`, `tests/*`)**:
+  - Wrapped every SQLite database helper in `backend/database.py` (and `scraper.py` cookie checks) in `try/finally: conn.close()` with zero connection leaks.
+  - Added HTTP security headers, input validation/sanitization, SSRF-safe read-only `check_ota_updates()`, MongoDB error credential redaction, corporate neutrality, and 30 unit/regression tests (`30/30 OK`).
+
+### Completed Sprint: Complete Alerts (Timecards, Punch Audits & Option Days), Exclude Prepaid Vacation & Clean Archive Header (v2.4.9)
 
 - [x] 1. **Alerts for Timecard Added, Punch Audits & Option Days (`backend/database.py`, `backend/scraper.py`, `backend/app.py`, `static/android_bridge.js`, `static/app.js`, `TimecardSyncJobService.java`)**:
   - Tracked newly detected punch modifications (`new_audits` for Start Time, End Time, Meal/Unpaid) alongside `new_timecards` and `option_day_alerts` in `backend/database.py`, `backend/scraper.py`, `backend/app.py`, and `static/android_bridge.js` (`getNewAuditsJson`).
@@ -165,7 +181,7 @@
 - [x] 4. **Verification & Delivery**:
   - All 19 automated unit tests passing (100% pass rate).
   - OTA bundle packaged at `static/ota_bundle.zip` (163.9 KB).
-  - Standalone APK compiled at [`Timecard-Tracker.apk`](file:///c:/Users/ibert/Desktop/timecard/Timecard-Tracker.apk) (0.24 MB).
+  - Standalone APK compiled at `Timecard-Tracker.apk` (0.24 MB).
 
 ### Completed Sprint: Streamline Navigation (Remove Corrections Tab) & Fast Instant OTA Update Engine
 - [x] 1. Removed Redundant Corrections Tab

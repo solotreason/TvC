@@ -14,7 +14,7 @@ import base64
 import shutil
 import sqlite3
 from typing import Dict, Any, Optional, Callable
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import BrowserContext, Page, Route, sync_playwright
 from .parser import parse_timecard_html
 from .timeoff_parser import parse_timeoff_html
 from .database import (
@@ -34,6 +34,10 @@ TIMEOFF_PORTAL_URL = os.environ.get(
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SESSION_DIR = os.path.join(PROJECT_DIR, ".portal_session")
 AUTH_MARKER_FILE = os.path.join(SESSION_DIR, ".authenticated")
+
+
+def _scrub_portal_url(text: Any) -> str:
+    return str(text).replace(_DEFAULT_PORTAL_BASE, "[portal]")
 
 
 def _mark_authenticated():
@@ -66,24 +70,24 @@ def check_auth_status() -> Dict[str, Any]:
         clean_path = os.path.abspath(cookie_file).replace("\\", "/")
         uri_path = f"file:///{clean_path}?mode=ro"
         conn = sqlite3.connect(uri_path, uri=True, timeout=2.0)
-        cur = conn.cursor()
-
-        now_epoch = time.time()
-        # Query active session & persistent authentication cookies
-        query = """
-            SELECT host_key, name, expires_utc 
-            FROM cookies
-        """
-        rows = cur.execute(query).fetchall()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            query = """
+                SELECT host_key, name, expires_utc
+                FROM cookies
+            """
+            rows = cur.execute(query).fetchall()
+        finally:
+            conn.close()
 
         if not rows:
             return {"logged_in": False, "message": "Session empty. Login required."}
 
+        now_epoch = time.time()
         has_auth_cookie = False
-        for host, name, exp in rows:
-            # Check for SSO persistent auth or portal session cookies
-            if name in ['ESTSAUTHPERSISTENT', 'user_firstName', 'ak_prt', 'session_id'] or name.startswith('AMCV_'):
+        for _host, name, exp in rows:
+            # Check for SSO persistent auth or portal session cookies (excluding analytics cookies)
+            if name in ("ESTSAUTHPERSISTENT", "user_firstName", "ak_prt", "session_id"):
                 if exp == 0:  # Valid session cookie
                     has_auth_cookie = True
                     break
@@ -95,11 +99,10 @@ def check_auth_status() -> Dict[str, Any]:
 
         if has_auth_cookie:
             return {"logged_in": True, "message": "Logged In"}
-        else:
-            return {"logged_in": False, "message": "Session expired. Please log in."}
+        return {"logged_in": False, "message": "Session expired. Please log in."}
     except Exception as e:
         # Fallback to file existence check if SQLite is temporarily locked
-        return {"logged_in": True if os.path.exists(cookie_file) else False, "message": f"Auth check note: {str(e)}"}
+        return {"logged_in": bool(os.path.exists(cookie_file)), "message": f"Auth check note: {_scrub_portal_url(e)}"}
 
 
 def logout_portal_session() -> Dict[str, Any]:
@@ -234,7 +237,7 @@ def launch_login_flow(timeout_seconds: int = 180) -> Dict[str, Any]:
             time.sleep(2)  # Give cookies a moment to write to disk
             return {"success": True, "logged_in": True, "message": "Successfully logged in and session saved!"}
         except Exception as e:
-            clean_err = str(e).replace(_DEFAULT_PORTAL_BASE, "[portal]")
+            clean_err = _scrub_portal_url(e)
             return {"success": False, "logged_in": False, "error": f"Login was not completed: {clean_err}"}
         finally:
             if context is not None:
@@ -282,7 +285,7 @@ def run_timecard_sync(
                 args=["--disable-blink-features=AutomationControlled"]
             )
         except Exception as launch_err:
-            msg = f"Failed to launch browser engine: {launch_err}"
+            msg = f"Failed to launch browser engine: {_scrub_portal_url(launch_err)}"
             notify(0, "Error", msg)
             log_sync_complete(sync_id, "FAILED", msg, 0)
             return {"success": False, "error": msg}
@@ -468,7 +471,7 @@ def run_timecard_sync(
                     weeks_synced += 1
                     synced_summaries.append(parsed["week_summary"])
                 except Exception as ex:
-                    print(f"Warning: Failed to process week {week_date}: {ex}")
+                    print(f"Warning: Failed to process week {week_date}: {_scrub_portal_url(ex)}")
 
             # Also sync Time Off Viewer if requested
             if sync_timeoff:
@@ -485,7 +488,7 @@ def run_timecard_sync(
                     option_day_alerts = upsert_entitlements(timeoff_data["entitlements"], profile=timeoff_data.get("profile")) or []
                     print(f"Time Off Viewer synced: {len(timeoff_data['entitlements'])} entitlements.")
                 except Exception as ex:
-                    print(f"Warning: Failed to sync Time Off Viewer: {ex}")
+                    print(f"Warning: Failed to sync Time Off Viewer: {_scrub_portal_url(ex)}")
 
             notify(100, "Complete", f"Successfully synced {weeks_synced} week(s) & leave bank in the background!")
             msg = f"Successfully synced {weeks_synced} week(s) & Time Off entitlements."
@@ -510,7 +513,7 @@ def run_timecard_sync(
             }
 
         except Exception as e:
-            clean_err = str(e).replace(_DEFAULT_PORTAL_BASE, "[portal]")
+            clean_err = _scrub_portal_url(e)
             err_msg = f"Sync encountered error: {clean_err}"
             print(err_msg)
             notify(0, "Error", err_msg)

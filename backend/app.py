@@ -2,23 +2,67 @@
 FastAPI application for Timecard Tracker & Time Off Auditor.
 Provides REST endpoints and serves the modern dashboard frontend.
 """
-import os
 import json
+import os
+import re
 import threading
+import time
+import urllib.request
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.staticfiles import StaticFiles
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from .database import (
-    init_db, get_all_weeks, get_active_and_archived_weeks, get_week_details,
-    get_all_corrections, get_latest_sync_status, get_entitlements, get_all_audit_logs,
-    clear_all_data, load_archive_vault, ARCHIVE_FILE
+    ARCHIVE_FILE,
+    clear_all_data,
+    get_active_and_archived_weeks,
+    get_all_audit_logs,
+    get_all_corrections,
+    get_all_weeks,
+    get_entitlements,
+    get_latest_sync_status,
+    get_week_details,
+    init_db,
+    load_archive_vault,
 )
 from .mongo_vault import sync_cloud_archive
-from .scraper import run_timecard_sync, check_auth_status, launch_login_flow, logout_portal_session
+from .scraper import check_auth_status, launch_login_flow, logout_portal_session, run_timecard_sync
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR = os.path.join(ROOT_DIR, "static")
+os.makedirs(STATIC_DIR, exist_ok=True)
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_DEFAULT_REPO = "solotreason/TvC"
+
+
+def _load_version_metadata() -> dict:
+    v_file = os.path.join(ROOT_DIR, "version.json")
+    if os.path.exists(v_file):
+        try:
+            with open(v_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {
+        "version": "2.5.2",
+        "build": 2026112502,
+        "github_repo": _DEFAULT_REPO,
+        "release_notes": "OTA Live Update Active",
+    }
+
+
+def _sanitize_emp_id(raw_emp_id: Optional[str]) -> Optional[str]:
+    if not raw_emp_id or not isinstance(raw_emp_id, str):
+        return None
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", "", raw_emp_id).strip()
+    return cleaned[:128] if cleaned else None
 
 
 @asynccontextmanager
@@ -27,18 +71,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="TvC - Timecard Viewer API", version="2.4.6", lifespan=lifespan)
+app = FastAPI(
+    title="TvC - Timecard Viewer API",
+    version=str(_load_version_metadata().get("version", "2.5.2")),
+    lifespan=lifespan,
+)
 
 
 @app.middleware("http")
-async def add_no_cache_headers(request, call_next):
+async def add_security_and_cache_headers(request, call_next):
     response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return response
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
-os.makedirs(STATIC_DIR, exist_ok=True)
 
 sync_lock = threading.Lock()
 sync_in_progress = False
@@ -47,12 +97,14 @@ sync_state = {
     "stage": "Idle",
     "message": "",
     "requires_login": False,
-    "new_timecards": []
+    "new_timecards": [],
+    "new_audits": [],
+    "option_day_alerts": [],
 }
 
 
 class SyncRequest(BaseModel):
-    max_weeks: int = 0  # 0 = All available weeks (8-10 weeks)
+    max_weeks: int = Field(default=0, ge=0, le=52)  # 0 = All available weeks (8-10 weeks)
     headless: bool = True  # Run completely in background by default
     sync_timeoff: bool = True
 
@@ -62,12 +114,12 @@ def list_weeks():
     split = get_active_and_archived_weeks(limit=8)
     return {
         "weeks": split["weeks"],
-        "archived_weeks": split["archived_weeks"]
+        "archived_weeks": split["archived_weeks"],
     }
 
 
 class ArchiveSyncPayload(BaseModel):
-    emp_id: Optional[str] = None
+    emp_id: Optional[str] = Field(default=None, max_length=128)
     archived_weeks: Optional[list] = None
     week_details: Optional[dict] = None
     audit_logs: Optional[list] = None
@@ -81,14 +133,18 @@ def sync_archive_vault(payload: ArchiveSyncPayload, background_tasks: Background
     and schedules non-blocking synchronization with the MongoDB Cloud Vault so the UI never waits.
     """
     current_vault = load_archive_vault()
-    emp_id = payload.emp_id or current_vault.get("emp_id")
+    emp_id = _sanitize_emp_id(payload.emp_id) or _sanitize_emp_id(current_vault.get("emp_id"))
     if not emp_id:
         ent = get_entitlements()
-        emp_id = (ent.get("profile") or {}).get("emp_id", "default_user")
+        emp_id = _sanitize_emp_id((ent.get("profile") or {}).get("emp_id")) or "default_user"
 
-    merged_map = {w["week_end_date"]: w for w in current_vault.get("archived_weeks", [])}
+    merged_map = {
+        w["week_end_date"]: w
+        for w in current_vault.get("archived_weeks", [])
+        if isinstance(w, dict) and isinstance(w.get("week_end_date"), str) and _DATE_RE.match(w["week_end_date"])
+    }
     for w in (payload.archived_weeks or []):
-        if isinstance(w, dict) and w.get("week_end_date"):
+        if isinstance(w, dict) and isinstance(w.get("week_end_date"), str) and _DATE_RE.match(w["week_end_date"]):
             merged_map[w["week_end_date"]] = w
 
     for w in get_all_weeks():
@@ -96,9 +152,11 @@ def sync_archive_vault(payload: ArchiveSyncPayload, background_tasks: Background
             merged_map[w["week_end_date"]] = w
 
     sorted_weeks = sorted(merged_map.values(), key=lambda x: x.get("week_end_date", ""), reverse=True)
-    merged_details = current_vault.get("week_details", {})
-    if payload.week_details:
-        merged_details.update(payload.week_details)
+    merged_details = dict(current_vault.get("week_details", {})) if isinstance(current_vault.get("week_details"), dict) else {}
+    if isinstance(payload.week_details, dict):
+        for k, v in payload.week_details.items():
+            if isinstance(k, str) and _DATE_RE.match(k) and isinstance(v, dict):
+                merged_details[k] = v
     for wed in list(merged_map.keys()):
         if wed not in merged_details:
             det = get_week_details(wed)
@@ -133,7 +191,7 @@ def sync_archive_vault(payload: ArchiveSyncPayload, background_tasks: Background
         "archived_weeks": sorted_weeks,
         "week_details": merged_details,
         "audit_logs": all_merged_audits,
-        "corrections": all_merged_corrs
+        "corrections": all_merged_corrs,
     }
 
     try:
@@ -150,7 +208,7 @@ def sync_archive_vault(payload: ArchiveSyncPayload, background_tasks: Background
             local_archived_weeks=sorted_weeks,
             local_week_details=merged_details,
             local_audit_logs=all_merged_audits,
-            local_corrections=all_merged_corrs
+            local_corrections=all_merged_corrs,
         )
         cloud_synced = cloud_result.get("success", False)
     else:
@@ -160,7 +218,7 @@ def sync_archive_vault(payload: ArchiveSyncPayload, background_tasks: Background
             local_archived_weeks=sorted_weeks,
             local_week_details=merged_details,
             local_audit_logs=all_merged_audits,
-            local_corrections=all_merged_corrs
+            local_corrections=all_merged_corrs,
         )
         cloud_synced = True
 
@@ -171,7 +229,7 @@ def sync_archive_vault(payload: ArchiveSyncPayload, background_tasks: Background
         "total_archived_weeks": len(sorted_weeks),
         "archived_weeks": sorted_weeks,
         "audit_logs": all_merged_audits,
-        "corrections": all_merged_corrs
+        "corrections": all_merged_corrs,
     }
 
 
@@ -183,6 +241,9 @@ def list_archived_weeks():
 
 @app.get("/api/weeks/{week_end_date}")
 def get_week(week_end_date: str):
+    if not _DATE_RE.match(week_end_date):
+        raise HTTPException(status_code=400, detail="Invalid week_end_date format; expected YYYY-MM-DD")
+
     data = get_week_details(week_end_date)
     if not data:
         raise HTTPException(status_code=404, detail="Week not found")
@@ -213,7 +274,7 @@ def get_week(week_end_date: str):
         "st_amt": round(total_st_amt, 2),
         "ot_amt": round(total_ot_amt, 2),
         "dt_amt": round(total_dt_amt, 2),
-        "late_count": total_late_shifts
+        "late_count": total_late_shifts,
     }
 
     return data
@@ -231,8 +292,13 @@ def get_audit_history():
     vault = load_archive_vault()
     vault_audits = vault.get("audit_logs", [])
     if vault_audits:
-        seen = {f"{l.get('week_end_date')}|{l.get('date')}|{l.get('field_name')}|{l.get('old_value')}|{l.get('new_value')}": l for l in logs}
+        seen = {
+            f"{l.get('week_end_date')}|{l.get('date')}|{l.get('field_name')}|{l.get('old_value')}|{l.get('new_value')}": l
+            for l in logs
+        }
         for a in vault_audits:
+            if not isinstance(a, dict):
+                continue
             k = f"{a.get('week_end_date')}|{a.get('date')}|{a.get('field_name')}|{a.get('old_value')}|{a.get('new_value')}"
             if k not in seen:
                 seen[k] = a
@@ -250,6 +316,8 @@ def list_corrections():
     if vault_corrs:
         seen = {f"{c.get('timestamp')}|{c.get('item')}|{c.get('old_val')}|{c.get('new_val')}": c for c in corrections}
         for c in vault_corrs:
+            if not isinstance(c, dict):
+                continue
             k = f"{c.get('timestamp')}|{c.get('item')}|{c.get('old_val')}|{c.get('new_val')}"
             if k not in seen:
                 seen[k] = c
@@ -265,7 +333,7 @@ def auth_status():
 
 
 def _execute_login():
-    global sync_in_progress, sync_state
+    global sync_in_progress
     with sync_lock:
         sync_in_progress = True
         update_sync_progress(10, "Awaiting Login", "Opening browser window... Please complete your portal login/2FA.", True)
@@ -279,7 +347,7 @@ def _execute_login():
                         max_weeks=0,
                         headless=True,
                         sync_timeoff=True,
-                        progress_callback=update_sync_progress
+                        progress_callback=update_sync_progress,
                     )
                 else:
                     update_sync_progress(100, "Logged In", "Session saved! You are now authenticated.", False)
@@ -293,32 +361,23 @@ class LogoutRequest(BaseModel):
     clear_data: bool = True
 
 
-@app.post("/api/auth/login")
-def start_login_session(background_tasks: BackgroundTasks):
-    """Launches visible browser window so user can authenticate upfront."""
-    global sync_in_progress
-    if sync_in_progress:
-        return JSONResponse(status_code=409, content={"message": "A browser task is already in progress"})
-    background_tasks.add_task(_execute_login)
-    return {"message": "Login window launched. Complete 2FA in the browser."}
-
-
 @app.post("/api/auth/logout")
 def logout_session(req: Optional[LogoutRequest] = None):
     """Logs out of portal session and optionally clears synced local data."""
-    global sync_in_progress
     if sync_in_progress:
         return JSONResponse(status_code=409, content={"message": "Cannot log out while a sync is in progress"})
     res = logout_portal_session()
     should_clear = True if req is None else req.clear_data
     if should_clear:
         clear_all_data()
+    sync_state["new_timecards"] = []
+    sync_state["new_audits"] = []
+    sync_state["option_day_alerts"] = []
     update_sync_progress(0, "Logged Out", "Logged out of portal session.", False)
     return res
 
 
 def update_sync_progress(percent: int, stage: str, message: str, requires_login: bool = False):
-    global sync_state
     sync_state["percent"] = percent
     sync_state["stage"] = stage
     sync_state["message"] = message
@@ -337,12 +396,12 @@ def sync_status():
         "new_timecards": sync_state.get("new_timecards", []),
         "new_audits": sync_state.get("new_audits", []),
         "option_day_alerts": sync_state.get("option_day_alerts", []),
-        "latest_log": latest
+        "latest_log": latest,
     }
 
 
 def _execute_sync(max_weeks: int, headless: bool, sync_timeoff: bool):
-    global sync_in_progress, sync_state
+    global sync_in_progress
     with sync_lock:
         sync_in_progress = True
         sync_state["new_timecards"] = []
@@ -354,7 +413,7 @@ def _execute_sync(max_weeks: int, headless: bool, sync_timeoff: bool):
                 max_weeks=max_weeks,
                 headless=headless,
                 sync_timeoff=sync_timeoff,
-                progress_callback=update_sync_progress
+                progress_callback=update_sync_progress,
             )
             if isinstance(res, dict):
                 if res.get("new_timecards"):
@@ -369,9 +428,17 @@ def _execute_sync(max_weeks: int, headless: bool, sync_timeoff: bool):
             sync_in_progress = False
 
 
+@app.post("/api/auth/login")
+def start_login_session(background_tasks: BackgroundTasks):
+    """Launches visible browser window so user can authenticate upfront."""
+    if sync_in_progress:
+        return JSONResponse(status_code=409, content={"message": "A browser task is already in progress"})
+    background_tasks.add_task(_execute_login)
+    return {"message": "Login window launched. Complete 2FA in the browser."}
+
+
 @app.post("/api/sync")
 def trigger_sync(req: SyncRequest, background_tasks: BackgroundTasks):
-    global sync_in_progress
     if sync_in_progress:
         return JSONResponse(status_code=409, content={"message": "A sync is already in progress"})
 
@@ -379,33 +446,34 @@ def trigger_sync(req: SyncRequest, background_tasks: BackgroundTasks):
     return {
         "message": f"Sync started in background ({'Headless' if req.headless else 'Headed'})",
         "headless": req.headless,
-        "max_weeks": req.max_weeks
+        "max_weeks": req.max_weeks,
     }
 
 
 @app.get("/api/ota/status")
 def get_ota_status():
-    v_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "version.json")
-    if os.path.exists(v_file):
-        try:
-            with open(v_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
-        "version": "2.4.6",
-        "build": 2026111404,
-        "github_repo": "solotreason/TvC",
-        "release_notes": "OTA Live Update Active"
-    }
+    return _load_version_metadata()
 
 
 @app.post("/api/ota/check")
 def check_ota_updates():
-    import time
-    import urllib.request
+    """
+    Read-only OTA update check against GitHub version metadata without mutating local files or state.
+    """
     local_meta = get_ota_status()
-    repo = local_meta.get("github_repo", "solotreason/TvC")
+    local_version = str(local_meta.get("version", "2.5.2"))
+    try:
+        local_build = int(local_meta.get("build", 0) or 0)
+    except (TypeError, ValueError):
+        local_build = 0
+    try:
+        local_apk_build = int(local_meta.get("apk_build", local_build) or local_build)
+    except (TypeError, ValueError):
+        local_apk_build = local_build
+
+    raw_repo = str(local_meta.get("github_repo") or _DEFAULT_REPO).strip()
+    repo = raw_repo if _GITHUB_REPO_RE.match(raw_repo) else _DEFAULT_REPO
+
     ts = int(time.time() * 1000)
     candidate_urls = [
         f"https://raw.githubusercontent.com/{repo}/main/version.json?t={ts}",
@@ -416,37 +484,54 @@ def check_ota_updates():
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "TvC-Web/2.4.6",
+                    "User-Agent": f"TvC-Web/{local_version}",
                     "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Pragma": "no-cache"
-                }
+                    "Pragma": "no-cache",
+                },
             )
             with urllib.request.urlopen(req, timeout=4.0) as resp:
-                remote = json.loads(resp.read().decode("utf-8"))
-                remote_build = int(remote.get("build", 0))
-                local_build = int(local_meta.get("build", 0))
+                remote = json.loads(resp.read(65536).decode("utf-8"))
+                if not isinstance(remote, dict):
+                    continue
+                remote_build = int(remote.get("build", 0) or 0)
+                remote_apk_build = int(remote.get("apk_build", 0) or 0)
+                apk_update_available = remote_apk_build > local_apk_build
                 if remote_build > local_build:
                     return {
                         "status": "OK",
+                        "checked_remote": True,
                         "update_available": True,
-                        "version": remote.get("version"),
+                        "up_to_date": False,
+                        "apk_update_available": apk_update_available,
+                        "version": remote.get("version") or local_version,
                         "build": remote_build,
-                        "notes": remote.get("release_notes", "")
+                        "apk_build": remote_apk_build,
+                        "current_version": local_version,
+                        "current_build": local_build,
+                        "ota_sha256": remote.get("ota_sha256", ""),
+                        "apk_sha256": remote.get("apk_sha256", ""),
+                        "notes": remote.get("release_notes", ""),
                     }
                 return {
                     "status": "OK",
+                    "checked_remote": True,
+                    "update_available": False,
                     "up_to_date": True,
-                    "version": local_meta.get("version", "2.4.6"),
-                    "build": local_build
+                    "apk_update_available": apk_update_available,
+                    "version": local_version,
+                    "build": local_build,
                 }
         except Exception:
             continue
 
     return {
         "status": "OK",
+        "checked_remote": False,
+        "update_available": False,
         "up_to_date": True,
-        "version": local_meta.get("version", "2.4.6"),
-        "build": int(local_meta.get("build", 0))
+        "apk_update_available": False,
+        "version": local_version,
+        "build": local_build,
     }
 
 
@@ -459,8 +544,8 @@ def serve_service_worker():
             media_type="application/javascript",
             headers={
                 "Service-Worker-Allowed": "/",
-                "Cache-Control": "no-cache, must-revalidate"
-            }
+                "Cache-Control": "no-cache, must-revalidate",
+            },
         )
     raise HTTPException(status_code=404, detail="Service worker not found")
 

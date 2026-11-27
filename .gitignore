@@ -1,20 +1,27 @@
 # Credentials & Secrets
 .env
 .env.*
+*.jks
+*.keystore
 
 # Local Runtime & Database Storage
 timecard.db
 timecard.db-shm
 timecard.db-wal
 test_timecard.db
+test_timecard.db-shm
+test_timecard.db-wal
 archive/
 .portal_session/
 portal_config.json
+ota_temp.zip
 
 # Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
+venv/
 
 # Android Build Outputs
 android/build/

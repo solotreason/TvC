@@ -193,5 +193,148 @@ class TestAppEndpoints(unittest.TestCase):
         self.assertEqual(chk.status_code, 200)
         self.assertEqual(chk.json().get("status"), "OK")
 
+    def test_security_headers_and_cache_control(self):
+        res_index = self.client.get("/")
+        self.assertEqual(res_index.status_code, 200)
+        self.assertEqual(res_index.headers.get("x-content-type-options"), "nosniff")
+        self.assertEqual(res_index.headers.get("x-frame-options"), "DENY")
+        self.assertEqual(res_index.headers.get("referrer-policy"), "no-referrer")
+        self.assertIn("geolocation=()", res_index.headers.get("permissions-policy", ""))
+        self.assertIn("no-store", res_index.headers.get("cache-control", ""))
+
+        res_api = self.client.get("/api/weeks")
+        self.assertEqual(res_api.status_code, 200)
+        self.assertEqual(res_api.headers.get("x-content-type-options"), "nosniff")
+        self.assertEqual(res_api.headers.get("x-frame-options"), "DENY")
+
+    def test_input_validation_and_sanitization(self):
+        # Invalid week_end_date formats must return 400
+        bad_week = self.client.get("/api/weeks/not-a-date")
+        self.assertEqual(bad_week.status_code, 400)
+        sqli_week = self.client.get("/api/weeks/2026-11-07'OR'1'='1")
+        self.assertEqual(sqli_week.status_code, 400)
+
+        # Valid date format that doesn't exist must return 404
+        missing_week = self.client.get("/api/weeks/2099-12-31")
+        self.assertEqual(missing_week.status_code, 404)
+
+        # Negative or excessive max_weeks in /api/sync must return 422
+        neg_sync = self.client.post("/api/sync", json={"max_weeks": -1, "headless": True})
+        self.assertEqual(neg_sync.status_code, 422)
+        huge_sync = self.client.post("/api/sync", json={"max_weeks": 500, "headless": True})
+        self.assertEqual(huge_sync.status_code, 422)
+
+        # Control chars in emp_id and malformed week_details keys are sanitized cleanly
+        res_arch = self.client.post(
+            "/api/archive/sync",
+            json={
+                "emp_id": "  EMP_CLEAN_01\x00\n ",
+                "archived_weeks": [
+                    {"week_end_date": "../bad", "status": "Final"},
+                    {"week_end_date": "2026-03-28", "status": "Final", "gross_pay": 1000.0, "total_hours": 25.0},
+                ],
+                "week_details": {
+                    "../bad": {"shifts": []},
+                    "2026-03-28": {"week_end_date": "2026-03-28", "shifts": []},
+                },
+            },
+        )
+        self.assertEqual(res_arch.status_code, 200)
+        body = res_arch.json()
+        self.assertEqual(body["emp_id"], "EMP_CLEAN_01")
+        archived_dates = [w["week_end_date"] for w in body["archived_weeks"]]
+        self.assertIn("2026-03-28", archived_dates)
+        self.assertNotIn("../bad", archived_dates)
+
+    def test_check_ota_updates_accuracy_and_zero_side_effects(self):
+        import json
+        import os
+        import urllib.error
+        from pathlib import Path
+        from unittest.mock import patch
+
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        v_path = Path(root_dir) / "version.json"
+        before_bytes = v_path.read_bytes() if v_path.exists() else None
+
+        class _FakeResp:
+            def __init__(self, payload: dict):
+                self._raw = json.dumps(payload).encode("utf-8")
+
+            def read(self, _n: int = -1) -> bytes:
+                return self._raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        # 1. Newer remote build + SHA-256 metadata + SSRF repo sanitization check
+        requested_urls = []
+
+        def _fake_urlopen_newer(req, timeout=4.0):
+            requested_urls.append(req.full_url)
+            return _FakeResp({
+                "version": "9.9.9",
+                "build": 2099123199,
+                "apk_build": 2099123199,
+                "release_notes": "Security release",
+                "ota_sha256": "a" * 64,
+                "apk_sha256": "b" * 64,
+            })
+
+        with patch("backend.app.get_ota_status", return_value={
+            "version": "2.5.2",
+            "build": 2026112502,
+            "apk_build": 2026112502,
+            "github_repo": "https://evil.example.com/inject",
+        }), patch("urllib.request.urlopen", side_effect=_fake_urlopen_newer):
+            resp = self.client.post("/api/ota/check")
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.json()
+            self.assertTrue(payload["checked_remote"])
+            self.assertTrue(payload["update_available"])
+            self.assertFalse(payload["up_to_date"])
+            self.assertTrue(payload["apk_update_available"])
+            self.assertEqual(payload["version"], "9.9.9")
+            self.assertEqual(payload["build"], 2099123199)
+            self.assertEqual(payload["ota_sha256"], "a" * 64)
+            self.assertEqual(payload["apk_sha256"], "b" * 64)
+            # Malformed github_repo must fall back to solotreason/TvC
+            self.assertTrue(requested_urls[0].startswith("https://raw.githubusercontent.com/solotreason/TvC/"))
+
+        # 2. Equal remote build -> up_to_date=True, update_available=False
+        with patch("backend.app.get_ota_status", return_value={
+            "version": "2.5.2",
+            "build": 2026112502,
+            "apk_build": 2026112502,
+            "github_repo": "solotreason/TvC",
+        }), patch("urllib.request.urlopen", return_value=_FakeResp({
+            "version": "2.5.2",
+            "build": 2026112502,
+            "apk_build": 2026112502,
+        })):
+            resp_eq = self.client.post("/api/ota/check")
+            self.assertEqual(resp_eq.status_code, 200)
+            p_eq = resp_eq.json()
+            self.assertTrue(p_eq["checked_remote"])
+            self.assertFalse(p_eq["update_available"])
+            self.assertTrue(p_eq["up_to_date"])
+            self.assertFalse(p_eq["apk_update_available"])
+
+        # 3. Offline / network error -> checked_remote=False, zero crash
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")):
+            resp_off = self.client.post("/api/ota/check")
+            self.assertEqual(resp_off.status_code, 200)
+            p_off = resp_off.json()
+            self.assertEqual(p_off["status"], "OK")
+            self.assertFalse(p_off["checked_remote"])
+            self.assertFalse(p_off["update_available"])
+
+        # Verify version.json was never modified by /api/ota/check
+        after_bytes = v_path.read_bytes() if v_path.exists() else None
+        self.assertEqual(before_bytes, after_bytes)
+
 if __name__ == "__main__":
     unittest.main()

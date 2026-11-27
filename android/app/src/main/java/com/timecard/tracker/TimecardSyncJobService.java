@@ -52,9 +52,9 @@ public class TimecardSyncJobService extends JobService {
     public static final int JOB_ID = 2026;
     public static final int FAST_JOB_ID = 2027;
 
-    private static final String PREF_NOTIFIED_SIGNATURES = "notified_shift_signatures_v2";
-    private static final String PREF_LAST_ROLLOVER_SYNC_MS = "last_rollover_bg_sync_ms";
-    private static final int MAX_NOTIFIED_SIGNATURES = 400;
+    private static final String PREF_NOTIFIED_SIGNATURES = PortalHelper.PREF_NOTIFIED_SIGNATURES;
+    private static final String PREF_LAST_ROLLOVER_SYNC_MS = PortalHelper.PREF_LAST_ROLLOVER_SYNC_MS;
+    private static final int MAX_NOTIFIED_SIGNATURES = PortalHelper.MAX_NOTIFIED_SIGNATURES;
     private static final long PERIODIC_INTERVAL_MS = 15 * 60 * 1000L;
     private static final long PERIODIC_FLEX_MS = 5 * 60 * 1000L;
     private static final long PRIME_CHECK_DELAY_MS = 5 * 60 * 1000L;
@@ -89,9 +89,23 @@ public class TimecardSyncJobService extends JobService {
         final String weekEndDate;
         final String rawHtml;
 
-        CapturedWeek(String weekEndDate, String rawHtml) {
+        private CapturedWeek(String weekEndDate, String rawHtml) {
             this.weekEndDate = weekEndDate;
             this.rawHtml = rawHtml;
+        }
+    }
+
+    private static final class AlertSegment {
+        final String title;
+        final String body;
+        final String weekEndDate;
+        final String shiftDate;
+
+        AlertSegment(String title, String body, String weekEndDate, String shiftDate) {
+            this.title = title;
+            this.body = body;
+            this.weekEndDate = weekEndDate;
+            this.shiftDate = shiftDate;
         }
     }
 
@@ -520,7 +534,8 @@ public class TimecardSyncJobService extends JobService {
                 "  try {" +
                 "    var w = document.querySelector('.timeoff-wrapper');" +
                 "    var loader = document.querySelector('#tovLoader, #toLoader');" +
-                "    var loaderVis = !!(loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none');" +
+                "    var loaderSt = loader ? window.getComputedStyle(loader) : null;" +
+                "    var loaderVis = !!(loaderSt && loaderSt.display !== 'none' && loaderSt.visibility !== 'hidden' && loaderSt.opacity !== '0');" +
                 "    var rows = document.querySelectorAll('.timeoff-list-view table tbody tr');" +
                 "    if (!w || loaderVis || rows.length === 0) return JSON.stringify({ready: false});" +
                 "    var sigs = [];" +
@@ -626,7 +641,8 @@ public class TimecardSyncJobService extends JobService {
 
         String checkJs = "(function(){" +
                 "  var loader = document.querySelector('#tcvLoader');" +
-                "  var loaderVis = !!(loader && loader.offsetParent !== null && window.getComputedStyle(loader).display !== 'none');" +
+                "  var loaderSt = loader ? window.getComputedStyle(loader) : null;" +
+                "  var loaderVis = !!(loaderSt && loaderSt.display !== 'none' && loaderSt.visibility !== 'hidden' && loaderSt.opacity !== '0');" +
                 "  var sel = document.querySelector('.timecard-date-dropdown select');" +
                 "  var cur = sel && sel.value ? sel.value.trim() : '';" +
                 "  var rows = document.querySelectorAll('tr.timecard-card');" +
@@ -772,7 +788,7 @@ public class TimecardSyncJobService extends JobService {
     }
 
     /**
-     * Fires deduplicated notifications strictly for:
+     * Consolidates and fires AT MOST ONE deduplicated notification per sync cycle strictly for:
      * (1) Completed daily timecard posted (never incomplete clock-in-only punches),
      * (2) Supervisor punch modifications (audit_logs & TimecardBridge.getNewAuditsJson), and
      * (3) Option Day used (either daily timecard Option Day row or Time Off Viewer Option Day balance decrease).
@@ -795,8 +811,7 @@ public class TimecardSyncJobService extends JobService {
             boolean isInitialBaseline = beforeStore.optJSONArray("weeks") == null
                     || beforeStore.optJSONArray("weeks").length() == 0;
 
-            SharedPreferences prefs = getSharedPreferences(PortalHelper.PREFS_NAME, MODE_PRIVATE);
-            Set<String> notifiedSet = new HashSet<>(prefs.getStringSet(PREF_NOTIFIED_SIGNATURES, new HashSet<>()));
+            Set<String> notifiedSet = PortalHelper.getNotifiedSignatures(this);
             Map<String, JSONObject> preShiftsByDate = indexShiftsByDate(beforeStore);
             Map<String, JSONObject> afterShiftsByDate = indexShiftsByDate(afterStore);
 
@@ -820,7 +835,7 @@ public class TimecardSyncJobService extends JobService {
                     }
                 }
                 pruneNotifiedSignatures(notifiedSet, afterShiftsByDate);
-                prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, notifiedSet).apply();
+                PortalHelper.saveNotifiedSignatures(this, notifiedSet);
                 return;
             }
 
@@ -878,7 +893,29 @@ public class TimecardSyncJobService extends JobService {
                 }
             }
 
-            // Trigger (1): Completed daily timecard(s) posted
+            // Collect Option Day entitlement bank drops & punch modifications BEFORE dispatching
+            // so all triggers in this sync cycle combine into AT MOST ONE notification.
+            List<JSONObject> freshBankDrops = notifyForOptionDayBankChanges(
+                    bridgeOptionAlerts,
+                    beforeStore.optJSONObject("timeoff"),
+                    afterStore.optJSONObject("timeoff"),
+                    notifiedSet
+            );
+            List<JSONObject> freshAudits = notifyForNewAudits(
+                    bridgeNewAudits,
+                    beforeStore.optJSONArray("audit_logs"),
+                    afterStore.optJSONArray("audit_logs"),
+                    preShiftsByDate,
+                    afterShiftsByDate,
+                    notifiedSet
+            );
+
+            pruneNotifiedSignatures(notifiedSet, afterShiftsByDate);
+            PortalHelper.saveNotifiedSignatures(this, notifiedSet);
+
+            List<AlertSegment> segments = new ArrayList<>();
+
+            // Segment (1): Completed daily timecard(s) posted
             if (!freshCompletedAlerts.isEmpty()) {
                 JSONObject latest = freshCompletedAlerts.get(freshCompletedAlerts.size() - 1);
                 String targetWeekEnd = latest.optString("week_end_date", "");
@@ -903,16 +940,17 @@ public class TimecardSyncJobService extends JobService {
                                     s.optDouble("total_hours", 0.0),
                                     s.optDouble("gross_pay", 0.0)));
                 }
-
-                PortalHelper.postShiftNotification(this, title, body.toString(), targetWeekEnd, targetDate);
+                segments.add(new AlertSegment(title, body.toString(), targetWeekEnd, targetDate));
             }
 
-            // Trigger (3a): Option Day posted on daily timecard row
+            // Segment (3a): Option Day posted on daily timecard row, OR (3b) Option Day bank decrease
             if (!freshOptionDayAlerts.isEmpty()) {
                 JSONObject latestOpt = freshOptionDayAlerts.get(freshOptionDayAlerts.size() - 1);
                 String targetWeekEnd = latestOpt.optString("week_end_date", "");
                 String targetDate = latestOpt.optString("date", "");
-                String title = "Option Day Used (" + targetDate + ")";
+                String title = freshOptionDayAlerts.size() == 1
+                        ? "Option Day Used (" + targetDate + ")"
+                        : freshOptionDayAlerts.size() + " Option Days Used";
 
                 StringBuilder body = new StringBuilder();
                 for (int i = 0; i < freshOptionDayAlerts.size(); i++) {
@@ -931,40 +969,85 @@ public class TimecardSyncJobService extends JobService {
                 if (!remainingSummary.isEmpty()) {
                     body.append(" • ").append(remainingSummary);
                 }
-                PortalHelper.postShiftNotification(this, title, body.toString(), targetWeekEnd, targetDate);
+                segments.add(new AlertSegment(title, body.toString(), targetWeekEnd, targetDate));
+            } else if (!freshBankDrops.isEmpty()) {
+                JSONObject drop = freshBankDrops.get(0);
+                String tType = drop.optString("timeoff_type", "OPT");
+                String dropTitle = drop.optString("title", "Option Day");
+                double oldAvail = drop.optDouble("old_available", 0.0);
+                double newAvail = drop.optDouble("new_available", 0.0);
+                String basis = drop.optString("time_basis", "Days");
+                String notifTitle = dropTitle + " Used";
+                String notifBody = String.format(
+                        Locale.US,
+                        "%s balance decreased: %.2f → %.2f %s remaining",
+                        dropTitle, oldAvail, newAvail, basis
+                );
+                segments.add(new AlertSegment(notifTitle, notifBody, "", "opt_" + tType));
             }
 
-            // Trigger (3b): Option Day / Option Week entitlement balance decrease in Time Off Viewer
-            notifyForOptionDayBankChanges(
-                    bridgeOptionAlerts,
-                    beforeStore.optJSONObject("timeoff"),
-                    afterStore.optJSONObject("timeoff"),
-                    !freshOptionDayAlerts.isEmpty(),
-                    notifiedSet
-            );
+            // Segment (2): Supervisor punch modifications detected in background
+            if (!freshAudits.isEmpty()) {
+                JSONObject primary = freshAudits.get(0);
+                String targetDate = primary.optString("date", "");
+                String targetWeekEnd = primary.optString("week_end_date", "");
+                String title = freshAudits.size() == 1
+                        ? "Punch Modification Detected (" + targetDate + ")"
+                        : freshAudits.size() + " Punch Modifications Detected";
+                StringBuilder body = new StringBuilder();
+                for (int i = 0; i < freshAudits.size(); i++) {
+                    if (i > 0) body.append(" | ");
+                    JSONObject a = freshAudits.get(i);
+                    String d = a.optString("date", "");
+                    if (freshAudits.size() > 1 && !d.isEmpty() && !d.equals(targetDate)) {
+                        body.append(d).append(" ");
+                    }
+                    body.append(a.optString("field_name", "Punch"))
+                            .append(" changed: ")
+                            .append(a.optString("old_value", ""))
+                            .append(" → ")
+                            .append(a.optString("new_value", ""));
+                }
+                segments.add(new AlertSegment(title, body.toString(), targetWeekEnd, targetDate));
+            }
 
-            // Trigger (2): Supervisor punch modifications detected in background
-            notifyForNewAudits(
-                    bridgeNewAudits,
-                    beforeStore.optJSONArray("audit_logs"),
-                    afterStore.optJSONArray("audit_logs"),
-                    preShiftsByDate,
-                    afterShiftsByDate,
-                    notifiedSet
-            );
+            if (segments.isEmpty()) return;
 
-            pruneNotifiedSignatures(notifiedSet, afterShiftsByDate);
-            prefs.edit().putStringSet(PREF_NOTIFIED_SIGNATURES, notifiedSet).apply();
+            AlertSegment primary = segments.get(0);
+            if (segments.size() == 1) {
+                PortalHelper.postShiftNotification(this, primary.title, primary.body, primary.weekEndDate, primary.shiftDate);
+            } else {
+                boolean sameDate = !primary.shiftDate.isEmpty();
+                StringBuilder combinedBody = new StringBuilder();
+                for (int i = 0; i < segments.size(); i++) {
+                    AlertSegment seg = segments.get(i);
+                    if (i > 0) combinedBody.append(" | ");
+                    combinedBody.append(seg.body);
+                    if (!primary.shiftDate.equals(seg.shiftDate)) {
+                        sameDate = false;
+                    }
+                }
+                String combinedTitle = sameDate
+                        ? "Timecard & Punch Update (" + primary.shiftDate + ")"
+                        : primary.title + " + " + (segments.size() - 1) + " More Update" + (segments.size() > 2 ? "s" : "");
+                PortalHelper.postShiftNotification(
+                        this,
+                        combinedTitle,
+                        combinedBody.toString(),
+                        primary.weekEndDate,
+                        primary.shiftDate
+                );
+            }
         } catch (Exception ignored) {}
     }
 
-    private void notifyForOptionDayBankChanges(
+    private List<JSONObject> notifyForOptionDayBankChanges(
             JSONArray bridgeOptionAlerts,
             JSONObject preTimeoff,
             JSONObject postTimeoff,
-            boolean alreadyNotifiedDailyRow,
             Set<String> notifiedSet
     ) {
+        List<JSONObject> freshDrops = new ArrayList<>();
         try {
             List<JSONObject> bankDrops = new ArrayList<>();
             if (bridgeOptionAlerts != null && bridgeOptionAlerts.length() > 0) {
@@ -1009,30 +1092,20 @@ public class TimecardSyncJobService extends JobService {
                 }
             }
 
-            boolean postedAlert = alreadyNotifiedDailyRow;
             for (JSONObject drop : bankDrops) {
                 String tType = drop.optString("timeoff_type", "OPT");
                 String title = drop.optString("title", "Option Day");
                 double oldAvail = drop.optDouble("old_available", 0.0);
                 double newAvail = drop.optDouble("new_available", 0.0);
-                String basis = drop.optString("time_basis", "Days");
                 if (isExcludedPayCodeText(tType) || isExcludedPayCodeText(title)) continue;
                 String sig = String.format(Locale.US, "optbank|%s|%.2f->%.2f", tType, oldAvail, newAvail);
                 if (notifiedSet.contains(sig)) continue;
 
                 notifiedSet.add(sig);
-                if (!postedAlert) {
-                    String notifTitle = title + " Used";
-                    String notifBody = String.format(
-                            Locale.US,
-                            "%s balance decreased: %.2f → %.2f %s remaining",
-                            title, oldAvail, newAvail, basis
-                    );
-                    PortalHelper.postShiftNotification(this, notifTitle, notifBody, "", "opt_" + tType);
-                    postedAlert = true;
-                }
+                freshDrops.add(drop);
             }
         } catch (Exception ignored) {}
+        return freshDrops;
     }
 
     private static String getRemainingOptionDaySummary(JSONObject store) {
@@ -1059,7 +1132,7 @@ public class TimecardSyncJobService extends JobService {
         return "";
     }
 
-    private void notifyForNewAudits(
+    private List<JSONObject> notifyForNewAudits(
             JSONArray bridgeNewAudits,
             JSONArray preAudits,
             JSONArray postAudits,
@@ -1067,6 +1140,7 @@ public class TimecardSyncJobService extends JobService {
             Map<String, JSONObject> afterShiftsByDate,
             Set<String> notifiedSet
     ) {
+        List<JSONObject> freshAudits = new ArrayList<>();
         Set<String> existingAuditKeys = new HashSet<>();
         if (preAudits != null) {
             for (int i = 0; i < preAudits.length(); i++) {
@@ -1095,9 +1169,8 @@ public class TimecardSyncJobService extends JobService {
             }
         }
 
-        if (candidateAudits.isEmpty()) return;
+        if (candidateAudits.isEmpty()) return freshAudits;
 
-        List<JSONObject> freshAudits = new ArrayList<>();
         for (Map.Entry<String, JSONObject> entry : candidateAudits.entrySet()) {
             String k = entry.getKey();
             JSONObject a = entry.getValue();
@@ -1116,28 +1189,7 @@ public class TimecardSyncJobService extends JobService {
             notifiedSet.add("audit|" + k);
             freshAudits.add(a);
         }
-
-        if (!freshAudits.isEmpty()) {
-            JSONObject primary = freshAudits.get(0);
-            String targetDate = primary.optString("date", "");
-            String targetWeekEnd = primary.optString("week_end_date", "");
-            String title = "Punch Modification Detected (" + targetDate + ")";
-            StringBuilder body = new StringBuilder();
-            for (int i = 0; i < freshAudits.size(); i++) {
-                if (i > 0) body.append(" | ");
-                JSONObject a = freshAudits.get(i);
-                String d = a.optString("date", "");
-                if (freshAudits.size() > 1 && !d.isEmpty() && !d.equals(targetDate)) {
-                    body.append(d).append(" ");
-                }
-                body.append(a.optString("field_name", "Punch"))
-                        .append(" changed: ")
-                        .append(a.optString("old_value", ""))
-                        .append(" → ")
-                        .append(a.optString("new_value", ""));
-            }
-            PortalHelper.postShiftNotification(this, title, body.toString(), targetWeekEnd, targetDate);
-        }
+        return freshAudits;
     }
 
     /** Caps PREF_NOTIFIED_SIGNATURES so SharedPreferences never grows unboundedly over time. */
@@ -1481,10 +1533,6 @@ public class TimecardSyncJobService extends JobService {
         } else {
             mainHandler.post(finishAction);
         }
-    }
-
-    private void cleanupWebViews() {
-        destroyWebViews();
     }
 
     private void destroyWebViews() {

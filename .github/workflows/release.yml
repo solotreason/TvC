@@ -1,0 +1,120 @@
+name: Publish OTA & APK Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "version.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release-main
+  cancel-in-progress: false
+
+jobs:
+  publish-release:
+    name: Create or Update Latest GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version.json and verify SHA-256 digests
+        id: meta
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+
+          with open("version.json", "r", encoding="utf-8") as f:
+              meta = json.load(f)
+
+          version = str(meta["version"]).strip()
+          build = str(meta["build"]).strip()
+          apk_build = str(meta.get("apk_build", build)).strip()
+          notes = str(meta.get("release_notes", "Performance improvements and bug fixes")).strip()
+          ota_sha = str(meta.get("ota_sha256", "")).strip().lower()
+          apk_sha = str(meta.get("apk_sha256", "")).strip().lower()
+          tag = f"v{version}-{build}"
+
+          def sha256_file(path: str) -> str:
+              h = hashlib.sha256()
+              with open(path, "rb") as fp:
+                  for chunk in iter(lambda: fp.read(65536), b""):
+                      h.update(chunk)
+              return h.hexdigest().lower()
+
+          ota_path = os.path.join("static", "ota_bundle.zip")
+          if not os.path.isfile(ota_path):
+              print(f"ERROR: Missing required OTA bundle at {ota_path}", file=sys.stderr)
+              sys.exit(1)
+
+          actual_ota_sha = sha256_file(ota_path)
+          if ota_sha and actual_ota_sha != ota_sha:
+              print(f"ERROR: ota_bundle.zip SHA-256 mismatch: expected {ota_sha}, got {actual_ota_sha}", file=sys.stderr)
+              sys.exit(1)
+
+          apk_path = "Timecard-Tracker.apk"
+          has_apk = os.path.isfile(apk_path)
+          actual_apk_sha = sha256_file(apk_path) if has_apk else ""
+          if has_apk and apk_sha and actual_apk_sha != apk_sha:
+              print(f"ERROR: Timecard-Tracker.apk SHA-256 mismatch: expected {apk_sha}, got {actual_apk_sha}", file=sys.stderr)
+              sys.exit(1)
+
+          notes_path = os.path.join(os.environ["RUNNER_TEMP"], "release_notes.md")
+          lines = [
+              f"## TvC v{version} (Build `{build}`)",
+              "",
+              notes,
+              "",
+              "### SHA-256 Checksums",
+              f"- `ota_bundle.zip`: `{actual_ota_sha}`",
+          ]
+          if has_apk:
+              lines.append(f"- `Timecard-Tracker.apk` (APK Build `{apk_build}`): `{actual_apk_sha}`")
+          with open(notes_path, "w", encoding="utf-8") as nf:
+              nf.write("\n".join(lines) + "\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"tag={tag}\n")
+              out.write(f"title=TvC v{version} (Build {build})\n")
+              out.write(f"notes_file={notes_path}\n")
+              out.write(f"has_apk={'true' if has_apk else 'false'}\n")
+          PY
+
+      - name: Publish versioned GitHub Release as latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TITLE: ${{ steps.meta.outputs.title }}
+          NOTES_FILE: ${{ steps.meta.outputs.notes_file }}
+          HAS_APK: ${{ steps.meta.outputs.has_apk }}
+        shell: bash
+        run: |
+          ASSETS=("version.json" "static/ota_bundle.zip")
+          if [ "$HAS_APK" = "true" ]; then
+            ASSETS+=("Timecard-Tracker.apk")
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$TAG" \
+              --title "$TITLE" \
+              --notes-file "$NOTES_FILE" \
+              --latest
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes-file "$NOTES_FILE" \
+              --latest
+          fi

@@ -37,7 +37,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -47,23 +46,22 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public class MainActivity extends Activity {
 
     private static final String APP_HOST = "appassets.local";
-    private static final String NOTIFICATION_CHANNEL_ID = "daily_timecard_channel";
     private static final String STORE_FILENAME = "timecard_store_v4.json";
     private static final String ARCHIVE_FILENAME = "timecard_archive_v1.json";
-    private static final String AUTH_MARKER_FILENAME = "portal_auth_v4.flag";
     private static final String EXTRA_WEEK_END_DATE = "EXTRA_WEEK_END_DATE";
     private static final String EXTRA_SHIFT_DATE = "EXTRA_SHIFT_DATE";
-    private static final String PORTAL_CFG_FILENAME = "portal_config.json";
-    private static final String DEFAULT_TIMECARD_PATH = "/us/en/tools-and-resources/pay-and-benefits/time-card-viewer.html";
-    private static final String DEFAULT_TIMEOFF_PATH = "/us/en/tools-and-resources/pay-and-benefits/time-off-viewer.html";
 
     // GitHub Over-The-Air (OTA) Live Update Configuration
     private static final String DEFAULT_GITHUB_REPO = "solotreason/TvC";
@@ -71,8 +69,13 @@ public class MainActivity extends Activity {
     private static final String OTA_VERSION_FILENAME = "ota_version.json";
     private static final String PREFS_NAME = "tvc_prefs";
     private static final String PREF_KEY_GITHUB_REPO = "github_repo";
-    private static final long APP_BASE_BUILD = 2026112502L;
-    private static final String APP_BASE_VERSION = "2.5.2";
+    private static final long APP_BASE_BUILD = 2026112601L;
+    private static final String APP_BASE_VERSION = "2.5.3";
+
+    private static final int MAX_ZIP_ENTRIES = 256;
+    private static final long MAX_ZIP_TOTAL_BYTES = 50L * 1024L * 1024L;
+    private static final long DUPLICATE_NOTIF_WINDOW_MS = 15_000L;
+    private static final char[] HEX_CHARS = "0123456789abcdef".toCharArray();
 
     private WebView dashboardWebView;
     private WebView scraperWebView;
@@ -95,6 +98,8 @@ public class MainActivity extends Activity {
     private volatile boolean isApkDownloading = false;
     private boolean pendingApkInstallAfterPermission = false;
     private String pendingApkUrl = null;
+    private String lastPostedNotifSignature = null;
+    private long lastPostedNotifAtMs = 0L;
 
     private static byte[] readFileFully(File file) throws IOException {
         try (FileInputStream fis = new FileInputStream(file);
@@ -108,10 +113,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String getPortalBaseUrl() {
-        return PortalHelper.getPortalBaseUrl(this);
-    }
-
     private String getTimecardPortalUrl() {
         return PortalHelper.getTimecardPortalUrl(this);
     }
@@ -122,7 +123,7 @@ public class MainActivity extends Activity {
 
     /**
      * Returns true ONLY when the URL path targets /time-card-viewer or /time-off-viewer (or about:blank).
-     * Never matches /welcome.html or sign-in pages on upsers.com / id.ups.com / microsoftonline.com.
+     * Never matches /welcome.html or external SSO sign-in pages (e.g. microsoftonline.com).
      */
     private boolean isTimecardOrTimeoffViewerUrl(String url) {
         return PortalHelper.isTimecardOrTimeoffViewerUrl(url);
@@ -130,10 +131,6 @@ public class MainActivity extends Activity {
 
     private boolean isPortalDestinationUrl(String url) {
         return PortalHelper.isPortalDestinationUrl(this, url);
-    }
-
-    private boolean isExternalSsoLoginUrl(String url) {
-        return PortalHelper.isExternalSsoLoginUrl(this, url);
     }
 
     private void hidePortalOverlayImmediately(WebView view) {
@@ -213,6 +210,7 @@ public class MainActivity extends Activity {
         setupWebViewDefaults(dashboardWebView);
         dashboardWebView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         dashboardWebView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+        dashboardWebView.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         dashboardWebView.addJavascriptInterface(new AndroidNativeBridge(), "AndroidNative");
         dashboardWebView.setWebChromeClient(new WebChromeClient());
         dashboardWebView.setWebViewClient(new WebViewClient() {
@@ -235,16 +233,20 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request != null ? request.getUrl() : null;
                 if (uri != null && !APP_HOST.equalsIgnoreCase(uri.getHost())) {
+                    String scheme = uri.getScheme() != null ? uri.getScheme().toLowerCase(Locale.ROOT) : "";
                     String urlStr = uri.toString();
-                    if (urlStr.toLowerCase().contains(".apk")) {
+                    if ("https".equals(scheme) && urlStr.toLowerCase(Locale.ROOT).contains(".apk")) {
                         downloadAndInstallApk(urlStr);
                         return true;
                     }
-                    try {
-                        Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
-                        startActivity(browserIntent);
-                        return true;
-                    } catch (Exception ignored) {}
+                    if ("https".equals(scheme) || "http".equals(scheme)) {
+                        try {
+                            Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
+                            startActivity(browserIntent);
+                        } catch (Exception ignored) {}
+                    }
+                    // Never allow dashboardWebView (which holds @JavascriptInterface) to navigate off APP_HOST
+                    return true;
                 }
                 return false;
             }
@@ -433,17 +435,100 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    private void postNativeNotification(String title, String body, String weekEndDate, String shiftDate) {
+    private synchronized void postNativeNotification(String title, String body, String weekEndDate, String shiftDate) {
+        String sig = (title != null ? title.trim() : "") + "|"
+                + (body != null ? body.trim() : "") + "|"
+                + (weekEndDate != null ? weekEndDate.trim() : "") + "|"
+                + (shiftDate != null ? shiftDate.trim() : "");
+        long now = System.currentTimeMillis();
+        if (sig.equals(lastPostedNotifSignature) && (now - lastPostedNotifAtMs) < DUPLICATE_NOTIF_WINDOW_MS) {
+            return;
+        }
+        lastPostedNotifSignature = sig;
+        lastPostedNotifAtMs = now;
         PortalHelper.postShiftNotification(this, title, body, weekEndDate, shiftDate);
     }
 
+    @SuppressWarnings("deprecation")
     private void setupWebViewDefaults(WebView webView) {
         PortalHelper.setupWebViewDefaults(webView);
+        WebSettings settings = webView.getSettings();
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+        settings.setAllowFileAccessFromFileURLs(false);
+        settings.setAllowUniversalAccessFromFileURLs(false);
+        settings.setGeolocationEnabled(false);
+    }
+
+    private static boolean isValidGitHubRepoSlug(String repo) {
+        if (repo == null) return false;
+        String trimmed = repo.trim();
+        return !trimmed.isEmpty()
+                && !trimmed.contains("..")
+                && trimmed.matches("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$");
     }
 
     private String getActiveGitHubRepo() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        return prefs.getString(PREF_KEY_GITHUB_REPO, DEFAULT_GITHUB_REPO);
+        String stored = prefs.getString(PREF_KEY_GITHUB_REPO, DEFAULT_GITHUB_REPO);
+        return isValidGitHubRepoSlug(stored) ? stored.trim() : DEFAULT_GITHUB_REPO;
+    }
+
+    private static String computeFileSha256(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream fis = new BufferedInputStream(new FileInputStream(file))) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = fis.read(buf)) > 0) {
+                digest.update(buf, 0, n);
+            }
+        }
+        byte[] hashBytes = digest.digest();
+        char[] hex = new char[hashBytes.length * 2];
+        for (int i = 0; i < hashBytes.length; i++) {
+            int v = hashBytes[i] & 0xFF;
+            hex[i * 2] = HEX_CHARS[v >>> 4];
+            hex[i * 2 + 1] = HEX_CHARS[v & 0x0F];
+        }
+        return new String(hex);
+    }
+
+    private static boolean isValidSha256Hex(String sha256) {
+        if (sha256 == null || sha256.length() != 64) return false;
+        for (int i = 0; i < 64; i++) {
+            char c = sha256.charAt(i);
+            boolean ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    private static boolean verifyFileSha256(File file, String expectedSha256) {
+        if (file == null || !file.exists() || !isValidSha256Hex(expectedSha256)) {
+            return false;
+        }
+        try {
+            String actual = computeFileSha256(file);
+            String expectedLower = expectedSha256.trim().toLowerCase(Locale.ROOT);
+            return MessageDigest.isEqual(
+                    actual.getBytes(StandardCharsets.US_ASCII),
+                    expectedLower.getBytes(StandardCharsets.US_ASCII)
+            );
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static String[] uniqueNonEmptyUrls(String... urls) {
+        Set<String> set = new LinkedHashSet<>();
+        if (urls != null) {
+            for (String u : urls) {
+                if (u != null && !u.trim().isEmpty()) {
+                    set.add(u.trim());
+                }
+            }
+        }
+        return set.toArray(new String[0]);
     }
 
     private void cleanupStaleOtaIfFactoryNewer() {
@@ -524,7 +609,12 @@ public class MainActivity extends Activity {
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
             ZipEntry entry;
             byte[] buffer = new byte[8192];
+            int entryCount = 0;
+            long totalExtractedBytes = 0L;
             while ((entry = zis.getNextEntry()) != null) {
+                if (++entryCount > MAX_ZIP_ENTRIES) {
+                    throw new SecurityException("Zip entry count limit exceeded");
+                }
                 String entryName = entry.getName();
                 if (entryName.startsWith("__MACOSX/") || entryName.endsWith(".DS_Store")) {
                     zis.closeEntry();
@@ -543,6 +633,10 @@ public class MainActivity extends Activity {
                     try (FileOutputStream fos = new FileOutputStream(dest, false)) {
                         int len;
                         while ((len = zis.read(buffer)) > 0) {
+                            totalExtractedBytes += len;
+                            if (totalExtractedBytes > MAX_ZIP_TOTAL_BYTES) {
+                                throw new SecurityException("Zip uncompressed size limit exceeded");
+                            }
                             fos.write(buffer, 0, len);
                         }
                     }
@@ -558,6 +652,7 @@ public class MainActivity extends Activity {
             try {
                 URL url = new URL(urlStr);
                 conn = (HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(true);
                 conn.setUseCaches(false);
                 conn.setConnectTimeout(timeoutMs);
                 conn.setReadTimeout(timeoutMs + 1000);
@@ -586,12 +681,14 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    private boolean downloadBundleWithFailover(String[] urls, File destinationFile, int timeoutMs) {
+    private boolean downloadBundleWithFailover(String[] urls, File destinationFile, int timeoutMs, String expectedSha256) {
+        boolean enforceSha = isValidSha256Hex(expectedSha256);
         for (String urlStr : urls) {
             HttpURLConnection conn = null;
             try {
                 URL url = new URL(urlStr);
                 conn = (HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(true);
                 conn.setUseCaches(false);
                 conn.setConnectTimeout(timeoutMs);
                 conn.setReadTimeout(timeoutMs + 8000);
@@ -609,10 +706,19 @@ public class MainActivity extends Activity {
                         }
                     }
                     if (destinationFile.length() > 500) {
+                        if (enforceSha && !verifyFileSha256(destinationFile, expectedSha256)) {
+                            destinationFile.delete();
+                            continue;
+                        }
                         return true;
+                    } else {
+                        destinationFile.delete();
                     }
                 }
             } catch (Exception ignored) {
+                if (destinationFile.exists()) {
+                    destinationFile.delete();
+                }
             } finally {
                 if (conn != null) {
                     try { conn.disconnect(); } catch (Exception ignored) {}
@@ -626,20 +732,23 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 String repo = getActiveGitHubRepo();
-                String[] candidateVersionUrls = new String[] {
-                        "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + System.currentTimeMillis(),
-                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/version.json?t=" + System.currentTimeMillis()
-                };
+                long nowTs = System.currentTimeMillis();
+                String[] candidateVersionUrls = uniqueNonEmptyUrls(
+                        "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + nowTs,
+                        "https://github.com/" + repo + "/releases/latest/download/version.json",
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/version.json?t=" + nowTs
+                );
 
                 String jsonStr = fetchJsonWithFailover(candidateVersionUrls, 3500);
                 if (jsonStr == null) {
                     if (manual) {
                         mainHandler.post(() -> {
-                            Toast.makeText(this, "Could not reach update server", Toast.LENGTH_SHORT).show();
-                            dashboardWebView.evaluateJavascript(
-                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Could not reach update server. Check connection.'});}",
-                                    null
-                            );
+                            if (dashboardWebView != null) {
+                                dashboardWebView.evaluateJavascript(
+                                        "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Could not reach update server. Check connection.'});}",
+                                        null
+                                );
+                            }
                         });
                     }
                     return;
@@ -652,35 +761,41 @@ public class MainActivity extends Activity {
                 String releaseNotes = remote.optString("release_notes", "Performance improvements.");
                 String bundleUrl = remote.optString("ota_bundle_url", "https://raw.githubusercontent.com/" + repo + "/main/static/ota_bundle.zip");
                 String apkUrl = remote.optString("apk_url", "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk");
+                String expectedOtaSha256 = remote.optString("ota_sha256", "").trim().toLowerCase(Locale.ROOT);
+                String remoteApkSha256 = remote.optString("apk_sha256", "").trim().toLowerCase(Locale.ROOT);
                 final boolean apkUpdateAvailable = remoteApkBuild > APP_BASE_BUILD;
 
                 JSONObject current = getCurrentOtaInfo();
                 long currentBuild = current.optLong("build", APP_BASE_BUILD);
 
                 if (remoteBuild <= currentBuild) {
-                    if (apkUpdateAvailable) {
-                        current.put("remote_apk_build", remoteApkBuild);
-                        current.put("apk_url", apkUrl);
+                    if (apkUpdateAvailable || !remoteApkSha256.isEmpty()) {
+                        if (apkUpdateAvailable) {
+                            current.put("remote_apk_build", remoteApkBuild);
+                            current.put("apk_url", apkUrl);
+                        }
+                        if (!remoteApkSha256.isEmpty()) {
+                            current.put("apk_sha256", remoteApkSha256);
+                        }
                         saveOtaVersionInfo(current);
                     }
                     mainHandler.post(() -> {
-                        if (apkUpdateAvailable) {
+                        if (dashboardWebView == null) return;
+                        if (manual) {
+                            // Single update path inside open OTA modal (showOtaCheckResult also reveals APK banner if needed)
+                            String js = String.format(
+                                    Locale.US,
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({up_to_date:%b,apk_update_available:%b,version:%s,build:%d,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}",
+                                    !apkUpdateAvailable, apkUpdateAvailable, JSONObject.quote(remoteVersion), remoteBuild, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes)
+                            );
+                            dashboardWebView.evaluateJavascript(js, null);
+                        } else if (apkUpdateAvailable) {
                             String apkJs = String.format(
+                                    Locale.US,
                                     "if(window.TimecardBridge && window.TimecardBridge.onApkUpdateAvailable){window.TimecardBridge.onApkUpdateAvailable({version:%s,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}",
                                     JSONObject.quote(remoteVersion), remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes)
                             );
                             dashboardWebView.evaluateJavascript(apkJs, null);
-                        }
-                        if (manual) {
-                            String toastMsg = apkUpdateAvailable
-                                    ? "Native APK update available (v" + remoteVersion + ")"
-                                    : "TvC is up to date (v" + remoteVersion + ")";
-                            Toast.makeText(this, toastMsg, Toast.LENGTH_SHORT).show();
-                            String js = String.format(
-                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({up_to_date:%b,apk_update_available:%b,version:%s,build:%d,apk_build:%d,local_apk_build:%d,apk_url:%s});}",
-                                    !apkUpdateAvailable, apkUpdateAvailable, JSONObject.quote(remoteVersion), remoteBuild, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl)
-                            );
-                            dashboardWebView.evaluateJavascript(js, null);
                         }
                     });
                     return;
@@ -688,31 +803,53 @@ public class MainActivity extends Activity {
 
                 if (manual) {
                     mainHandler.post(() -> {
-                        Toast.makeText(this, "Downloading update v" + remoteVersion + "...", Toast.LENGTH_SHORT).show();
-                        String js = String.format(
-                                "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({downloading:true,version:%s,build:%d});}",
-                                JSONObject.quote(remoteVersion), remoteBuild
-                        );
-                        dashboardWebView.evaluateJavascript(js, null);
+                        if (dashboardWebView != null) {
+                            String js = String.format(
+                                    Locale.US,
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({downloading:true,version:%s,build:%d});}",
+                                    JSONObject.quote(remoteVersion), remoteBuild
+                            );
+                            dashboardWebView.evaluateJavascript(js, null);
+                        }
                     });
                 }
 
                 File zipFile = new File(getFilesDir(), "ota_temp.zip");
                 String cacheBustedBundleUrl = bundleUrl + (bundleUrl.contains("?") ? "&t=" : "?t=") + remoteBuild;
-                String[] candidateBundleUrls = new String[] {
+                String[] candidateBundleUrls = uniqueNonEmptyUrls(
                         cacheBustedBundleUrl,
+                        "https://github.com/" + repo + "/releases/latest/download/ota_bundle.zip",
+                        "https://raw.githubusercontent.com/" + repo + "/main/static/ota_bundle.zip?t=" + remoteBuild,
                         "https://cdn.jsdelivr.net/gh/" + repo + "@main/static/ota_bundle.zip?t=" + remoteBuild
-                };
+                );
 
-                boolean downloaded = downloadBundleWithFailover(candidateBundleUrls, zipFile, 8000);
-                if (!downloaded) {
+                boolean downloaded = downloadBundleWithFailover(candidateBundleUrls, zipFile, 8000, expectedOtaSha256);
+                if (!downloaded || !zipFile.exists()) {
+                    if (zipFile.exists()) zipFile.delete();
                     if (manual) {
                         mainHandler.post(() -> {
-                            Toast.makeText(this, "Failed downloading update package", Toast.LENGTH_SHORT).show();
-                            dashboardWebView.evaluateJavascript(
-                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Failed downloading update package.'});}",
-                                    null
-                            );
+                            if (dashboardWebView != null) {
+                                dashboardWebView.evaluateJavascript(
+                                        "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Failed downloading verified update package.'});}",
+                                        null
+                                );
+                            }
+                        });
+                    }
+                    return;
+                }
+
+                // Mandatory SHA-256 cryptographic verification on ota_temp.zip before extraction
+                if (!verifyFileSha256(zipFile, expectedOtaSha256)) {
+                    zipFile.delete();
+                    if (manual) {
+                        mainHandler.post(() -> {
+                            if (dashboardWebView != null) {
+                                dashboardWebView.evaluateJavascript(
+                                        "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'OTA SHA-256 verification failed. Tampered or corrupted package deleted.'});}",
+                                        null
+                                );
+                            }
                         });
                     }
                     return;
@@ -738,11 +875,12 @@ public class MainActivity extends Activity {
                     deleteDirRecursively(stagingDir);
                     if (manual) {
                         mainHandler.post(() -> {
-                            Toast.makeText(this, "Invalid update package", Toast.LENGTH_SHORT).show();
-                            dashboardWebView.evaluateJavascript(
-                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Invalid update package format.'});}",
-                                    null
-                            );
+                            if (dashboardWebView != null) {
+                                dashboardWebView.evaluateJavascript(
+                                        "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:'Invalid update package format.'});}",
+                                        null
+                                );
+                            }
                         });
                     }
                     return;
@@ -766,6 +904,10 @@ public class MainActivity extends Activity {
                         }
                     }
                 }
+                if (!new File(otaDir, "index.html").exists() && otaOld.exists()) {
+                    deleteDirRecursively(otaDir);
+                    otaOld.renameTo(otaDir);
+                }
                 deleteDirRecursively(stagingDir);
                 deleteDirRecursively(otaOld);
 
@@ -774,6 +916,12 @@ public class MainActivity extends Activity {
                 newMeta.put("build", remoteBuild);
                 newMeta.put("remote_apk_build", remoteApkBuild);
                 newMeta.put("apk_url", apkUrl);
+                if (!expectedOtaSha256.isEmpty()) {
+                    newMeta.put("ota_sha256", expectedOtaSha256);
+                }
+                if (!remoteApkSha256.isEmpty()) {
+                    newMeta.put("apk_sha256", remoteApkSha256);
+                }
                 newMeta.put("release_notes", releaseNotes);
                 newMeta.put("github_repo", repo);
                 newMeta.put("installed_at", System.currentTimeMillis());
@@ -781,30 +929,49 @@ public class MainActivity extends Activity {
 
                 mainHandler.post(() -> {
                     if (!isSyncRunning && dashboardWebView != null) {
-                        Toast.makeText(this, "Updated to v" + remoteVersion + " (Build " + remoteBuild + ")!", Toast.LENGTH_SHORT).show();
+                        // Show OTA Toast ONLY when no Native APK update banner will appear after reload
+                        if (!apkUpdateAvailable) {
+                            Toast.makeText(this, "Updated to v" + remoteVersion + " (Build " + remoteBuild + ")!", Toast.LENGTH_SHORT).show();
+                        }
                         dashboardWebView.clearCache(true);
                         dashboardWebView.reload();
-                    } else {
-                        String js = String.format(
-                                "if(window.TimecardBridge && window.TimecardBridge.onOtaUpdateReady){window.TimecardBridge.onOtaUpdateReady({version:%s,build:%d,apk_update_available:%b,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}" +
-                                "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({update_installed:true,apk_update_available:%b,version:%s,build:%d,apk_build:%d,local_apk_build:%d,apk_url:%s});}",
-                                JSONObject.quote(remoteVersion), remoteBuild, apkUpdateAvailable, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes),
-                                apkUpdateAvailable, JSONObject.quote(remoteVersion), remoteBuild, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl)
-                        );
+                    } else if (dashboardWebView != null) {
+                        // Show a single non-overlapping banner (APK banner takes precedence when native APK is also newer)
+                        String js;
+                        if (apkUpdateAvailable) {
+                            js = String.format(
+                                    Locale.US,
+                                    "if(window.TimecardBridge && window.TimecardBridge.onApkUpdateAvailable){window.TimecardBridge.onApkUpdateAvailable({version:%s,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}",
+                                    JSONObject.quote(remoteVersion), remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes)
+                            );
+                        } else {
+                            js = String.format(
+                                    Locale.US,
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaUpdateReady){window.TimecardBridge.onOtaUpdateReady({version:%s,build:%d,apk_update_available:false,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}",
+                                    JSONObject.quote(remoteVersion), remoteBuild, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes)
+                            );
+                        }
+                        if (manual) {
+                            js += String.format(
+                                    Locale.US,
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({update_installed:true,apk_update_available:%b,version:%s,build:%d,apk_build:%d,local_apk_build:%d,apk_url:%s,notes:%s});}",
+                                    apkUpdateAvailable, JSONObject.quote(remoteVersion), remoteBuild, remoteApkBuild, APP_BASE_BUILD, JSONObject.quote(apkUrl), JSONObject.quote(releaseNotes)
+                            );
+                        }
                         dashboardWebView.evaluateJavascript(js, null);
-                        Toast.makeText(this, "Update v" + remoteVersion + " ready! Tap reload to apply.", Toast.LENGTH_LONG).show();
                     }
                 });
 
             } catch (Exception e) {
                 if (manual) {
                     mainHandler.post(() -> {
-                        Toast.makeText(this, "Update check failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                        String js = String.format(
-                                "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:%s});}",
-                                JSONObject.quote("Update check failed: " + (e.getMessage() != null ? e.getMessage() : "Network error"))
-                        );
-                        dashboardWebView.evaluateJavascript(js, null);
+                        if (dashboardWebView != null) {
+                            String js = String.format(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onOtaCheckResult){window.TimecardBridge.onOtaCheckResult({error:true,message:%s});}",
+                                    JSONObject.quote("Update check failed: " + (e.getMessage() != null ? e.getMessage() : "Network error"))
+                            );
+                            dashboardWebView.evaluateJavascript(js, null);
+                        }
                     });
                 }
             }
@@ -1241,10 +1408,14 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "APK download already in progress...", Toast.LENGTH_SHORT).show();
             return;
         }
+        String sanitizedCustomUrl = (customApkUrl != null && customApkUrl.trim().toLowerCase(Locale.ROOT).startsWith("https://"))
+                ? customApkUrl.trim()
+                : null;
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!getPackageManager().canRequestPackageInstalls()) {
                 pendingApkInstallAfterPermission = true;
-                pendingApkUrl = customApkUrl;
+                pendingApkUrl = sanitizedCustomUrl;
                 Toast.makeText(this, "Enable 'Allow from this source' and press Back to install", Toast.LENGTH_LONG).show();
                 try {
                     Intent permIntent = new Intent(
@@ -1258,31 +1429,53 @@ public class MainActivity extends Activity {
         }
 
         isApkDownloading = true;
-        Toast.makeText(this, "Downloading Native APK update...", Toast.LENGTH_SHORT).show();
         if (dashboardWebView != null) {
             dashboardWebView.evaluateJavascript(
-                    "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({downloading:true,message:'Downloading Timecard-Tracker.apk from GitHub...'});}",
+                    "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({downloading:true,message:'Downloading & verifying Timecard-Tracker.apk...'});}",
                     null
             );
         }
 
         new Thread(() -> {
+            File apkFile = ApkFileProvider.getApkUpdateFile(MainActivity.this);
             try {
                 String repo = getActiveGitHubRepo();
                 long ts = System.currentTimeMillis();
-                String primaryUrl = (customApkUrl != null && !customApkUrl.trim().isEmpty())
-                        ? customApkUrl.trim()
-                        : ("https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk");
-                String primaryCacheBusted = primaryUrl + (primaryUrl.contains("?") ? "&t=" : "?t=") + ts;
-                String[] candidateApkUrls = new String[] {
-                        primaryCacheBusted,
-                        "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk?t=" + ts,
-                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/Timecard-Tracker.apk?t=" + ts,
-                        "https://github.com/" + repo + "/releases/latest/download/Timecard-Tracker.apk"
-                };
 
-                File apkFile = ApkFileProvider.getApkUpdateFile(MainActivity.this);
-                boolean ok = downloadBundleWithFailover(candidateApkUrls, apkFile, 12000);
+                // Resolve expected apk_sha256 from live version.json first, falling back to stored ota_version.json
+                String expectedApkSha256 = "";
+                String remoteApkUrl = "";
+                String[] versionUrls = uniqueNonEmptyUrls(
+                        "https://raw.githubusercontent.com/" + repo + "/main/version.json?t=" + ts,
+                        "https://github.com/" + repo + "/releases/latest/download/version.json",
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/version.json?t=" + ts
+                );
+                String liveVersionJson = fetchJsonWithFailover(versionUrls, 3500);
+                if (liveVersionJson != null) {
+                    try {
+                        JSONObject remoteMeta = new JSONObject(liveVersionJson);
+                        expectedApkSha256 = remoteMeta.optString("apk_sha256", "").trim().toLowerCase(Locale.ROOT);
+                        remoteApkUrl = remoteMeta.optString("apk_url", "").trim();
+                    } catch (Exception ignored) {}
+                }
+                if (expectedApkSha256.isEmpty()) {
+                    expectedApkSha256 = getCurrentOtaInfo().optString("apk_sha256", "").trim().toLowerCase(Locale.ROOT);
+                }
+
+                String primaryUrl = sanitizedCustomUrl != null
+                        ? sanitizedCustomUrl
+                        : (!remoteApkUrl.isEmpty() && remoteApkUrl.toLowerCase(Locale.ROOT).startsWith("https://")
+                            ? remoteApkUrl
+                            : ("https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk"));
+                String primaryCacheBusted = primaryUrl + (primaryUrl.contains("?") ? "&t=" : "?t=") + ts;
+                String[] candidateApkUrls = uniqueNonEmptyUrls(
+                        primaryCacheBusted,
+                        "https://github.com/" + repo + "/releases/latest/download/Timecard-Tracker.apk",
+                        "https://raw.githubusercontent.com/" + repo + "/main/Timecard-Tracker.apk?t=" + ts,
+                        "https://cdn.jsdelivr.net/gh/" + repo + "@main/Timecard-Tracker.apk?t=" + ts
+                );
+
+                boolean ok = downloadBundleWithFailover(candidateApkUrls, apkFile, 12000, expectedApkSha256);
                 boolean validApk = false;
                 if (ok && apkFile.exists() && apkFile.length() > 50000) {
                     try (FileInputStream fis = new FileInputStream(apkFile)) {
@@ -1292,16 +1485,22 @@ public class MainActivity extends Activity {
                     } catch (Exception ignored) {}
                 }
 
-                if (!validApk) {
+                // Mandatory SHA-256 verification on Timecard-Tracker-update.apk before launching PackageInstaller
+                boolean shaVerified = validApk && verifyFileSha256(apkFile, expectedApkSha256);
+                if (!validApk || !shaVerified) {
                     if (apkFile.exists()) apkFile.delete();
                     isApkDownloading = false;
+                    final String errMsg = (validApk && !shaVerified)
+                            ? "APK SHA-256 verification failed. Deleted tampered/corrupted file."
+                            : "Could not download verified APK from GitHub.";
                     mainHandler.post(() -> {
-                        Toast.makeText(MainActivity.this, "Could not download APK from GitHub", Toast.LENGTH_LONG).show();
+                        Toast.makeText(MainActivity.this, errMsg, Toast.LENGTH_LONG).show();
                         if (dashboardWebView != null) {
-                            dashboardWebView.evaluateJavascript(
-                                    "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({error:true,message:'Failed to download APK from GitHub.'});}",
-                                    null
+                            String js = String.format(
+                                    "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({error:true,message:%s});}",
+                                    JSONObject.quote(errMsg)
                             );
+                            dashboardWebView.evaluateJavascript(js, null);
                         }
                     });
                     return;
@@ -1311,7 +1510,7 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> {
                     if (dashboardWebView != null) {
                         dashboardWebView.evaluateJavascript(
-                                "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({installing:true,message:'Launching Android installer...'});}",
+                                "if(window.TimecardBridge && window.TimecardBridge.onApkDownloadStatus){window.TimecardBridge.onApkDownloadStatus({installing:true,message:'SHA-256 verified! Launching Android installer...'});}",
                                 null
                         );
                     }
@@ -1326,6 +1525,7 @@ public class MainActivity extends Activity {
                     }
                 });
             } catch (Exception e) {
+                if (apkFile.exists()) apkFile.delete();
                 isApkDownloading = false;
                 mainHandler.post(() -> Toast.makeText(MainActivity.this, "APK update failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
             }
@@ -1351,6 +1551,25 @@ public class MainActivity extends Activity {
                     null
             );
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        cancelSyncWatchdog();
+        mainHandler.removeCallbacksAndMessages(null);
+        try {
+            if (scraperWebView != null) {
+                scraperWebView.stopLoading();
+                scraperWebView.destroy();
+                scraperWebView = null;
+            }
+            if (dashboardWebView != null) {
+                dashboardWebView.stopLoading();
+                dashboardWebView.destroy();
+                dashboardWebView = null;
+            }
+        } catch (Exception ignored) {}
+        super.onDestroy();
     }
 
     @Override
@@ -1558,12 +1777,13 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void setGitHubRepo(String repo) {
-            if (repo != null && !repo.trim().isEmpty()) {
+            if (isValidGitHubRepoSlug(repo)) {
+                final String cleanRepo = repo.trim();
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                         .edit()
-                        .putString(PREF_KEY_GITHUB_REPO, repo.trim())
+                        .putString(PREF_KEY_GITHUB_REPO, cleanRepo)
                         .apply();
-                mainHandler.post(() -> Toast.makeText(MainActivity.this, "GitHub repository set to " + repo.trim(), Toast.LENGTH_SHORT).show());
+                mainHandler.post(() -> Toast.makeText(MainActivity.this, "GitHub repository set to " + cleanRepo, Toast.LENGTH_SHORT).show());
             }
         }
     }

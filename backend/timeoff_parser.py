@@ -56,15 +56,14 @@ def parse_timeoff_html(html_content: str) -> Dict[str, Any]:
             time_basis = "Hours"
             earn_date = None
 
-            text = card.get_text()
             # Find Available Time:
-            avail_el = card.find(lambda e: "Available Time:" in e.text and e.name == "p")
+            avail_el = card.find(lambda e: e.name == "p" and "Available Time:" in e.get_text())
             if avail_el:
                 spans = avail_el.find_all("span")
                 if len(spans) >= 2:
                     avail_val = parse_float(spans[1].get_text(strip=True))
 
-            basis_el = card.find(lambda e: "Time Basis:" in e.text and e.name == "p")
+            basis_el = card.find(lambda e: e.name == "p" and "Time Basis:" in e.get_text())
             if basis_el:
                 spans = basis_el.find_all("span")
                 if len(spans) >= 2:

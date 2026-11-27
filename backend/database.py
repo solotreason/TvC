@@ -18,19 +18,24 @@ ARCHIVE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "archive
 
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.execute("PRAGMA cache_size = -8000;")  # 8MB memory page cache for fast lookups
-    conn.execute("PRAGMA temp_store = MEMORY;")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA cache_size = -8000;")  # 8MB memory page cache for fast lookups
+        conn.execute("PRAGMA temp_store = MEMORY;")
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def init_db():
     conn = get_connection()
-    with conn:
-        conn.executescript("""
+    try:
+        with conn:
+            conn.executescript("""
         CREATE TABLE IF NOT EXISTS weeks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             week_end_date TEXT UNIQUE NOT NULL,
@@ -140,24 +145,27 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_shift_audit_week ON shift_audit_log(week_end_date);
         CREATE INDEX IF NOT EXISTS idx_corrections_time ON corrections(timestamp);
         """)
-    conn.close()
+    finally:
+        conn.close()
 
 
 def upsert_week(week_data: Dict[str, Any]):
     """Insert or update week record."""
     conn = get_connection()
-    with conn:
-        conn.execute("""
-            INSERT INTO weeks (week_end_date, status, gross_pay, total_hours, last_updated_source, synced_at)
-            VALUES (:week_end_date, :status, :gross_pay, :total_hours, :last_updated_source, CURRENT_TIMESTAMP)
-            ON CONFLICT(week_end_date) DO UPDATE SET
-                status = excluded.status,
-                gross_pay = excluded.gross_pay,
-                total_hours = excluded.total_hours,
-                last_updated_source = excluded.last_updated_source,
-                synced_at = CURRENT_TIMESTAMP
-        """, week_data)
-    conn.close()
+    try:
+        with conn:
+            conn.execute("""
+                INSERT INTO weeks (week_end_date, status, gross_pay, total_hours, last_updated_source, synced_at)
+                VALUES (:week_end_date, :status, :gross_pay, :total_hours, :last_updated_source, CURRENT_TIMESTAMP)
+                ON CONFLICT(week_end_date) DO UPDATE SET
+                    status = excluded.status,
+                    gross_pay = excluded.gross_pay,
+                    total_hours = excluded.total_hours,
+                    last_updated_source = excluded.last_updated_source,
+                    synced_at = CURRENT_TIMESTAMP
+            """, week_data)
+    finally:
+        conn.close()
 
 
 def is_excluded_alert_pay_code(pay_code: Optional[str], details: Optional[List[Dict[str, Any]]] = None) -> bool:
@@ -167,6 +175,8 @@ def is_excluded_alert_pay_code(pay_code: Optional[str], details: Optional[List[D
         return True
     if details:
         for det in details:
+            if not isinstance(det, dict):
+                continue
             t = f"{det.get('trans_type', '')} {det.get('activity', '')}".strip().upper()
             if "VACATION - EMPLOYEE PREPAID" in t or ("VACATION" in t and "PREPAID" in t):
                 return True
@@ -178,12 +188,26 @@ def is_option_day_pay_code(pay_code: Optional[str], details: Optional[List[Dict[
     if is_excluded_alert_pay_code(pay_code, details):
         return False
     raw = (pay_code or "").strip().upper()
-    if any(tok in raw for tok in ("OPTION", "OPT DAY", "OPTDAY", "OPT WK", "OPT WEEK")) or raw in ("OPT", "OPW") or raw.startswith("OPT "):
+    if (
+        any(tok in raw for tok in ("OPTION", "OPT DAY", "OPTDAY", "OPT WK", "OPT WEEK"))
+        or raw in ("OPT", "OPW")
+        or raw.startswith(("OPT ", "OPW "))
+    ):
         return True
     if details:
         for det in details:
-            t = f"{det.get('trans_type', '')} {det.get('activity', '')}".strip().upper()
-            if any(tok in t for tok in ("OPTION", "OPT DAY", "OPTDAY", "OPT WK", "OPT WEEK")) or t in ("OPT", "OPW"):
+            if not isinstance(det, dict):
+                continue
+            trans_code = str(det.get("trans_type") or "").strip().upper()
+            act_code = str(det.get("activity") or "").strip().upper()
+            t = f"{trans_code} {act_code}".strip()
+            if (
+                trans_code in ("OPT", "OPW")
+                or act_code in ("OPT", "OPW")
+                or any(tok in t for tok in ("OPTION", "OPT DAY", "OPTDAY", "OPT WK", "OPT WEEK"))
+                or t in ("OPT", "OPW")
+                or t.startswith(("OPT ", "OPW "))
+            ):
                 return True
     return False
 
@@ -211,43 +235,118 @@ def upsert_shift(shift_data: Dict[str, Any], new_audits_out: Optional[List[Dict[
     conn = get_connection()
     is_newly_added_timecard = False
     is_excluded = is_excluded_alert_pay_code(shift_data.get("pay_code"), shift_data.get("details"))
-    with conn:
-        week_shift_count = conn.execute(
-            "SELECT COUNT(*) FROM shifts WHERE week_end_date = ?",
-            (shift_data["week_end_date"],)
-        ).fetchone()[0]
+    try:
+        with conn:
+            week_shift_count = conn.execute(
+                "SELECT COUNT(*) FROM shifts WHERE week_end_date = ?",
+                (shift_data["week_end_date"],)
+            ).fetchone()[0]
 
-        existing = conn.execute(
-            "SELECT * FROM shifts WHERE week_end_date = ? AND date = ?",
-            (shift_data["week_end_date"], shift_data["date"])
-        ).fetchone()
+            existing = conn.execute(
+                "SELECT * FROM shifts WHERE week_end_date = ? AND date = ?",
+                (shift_data["week_end_date"], shift_data["date"])
+            ).fetchone()
 
-        existing_dict = dict(existing) if existing else None
-        was_complete_or_opt = is_shift_completed(existing_dict) or (
-            existing_dict is not None and is_option_day_pay_code(existing_dict.get("pay_code"))
-        )
-        is_complete_or_opt_now = (not is_excluded) and (
-            is_shift_completed(shift_data) or is_option_day_pay_code(
-                shift_data.get("pay_code"), shift_data.get("details")
+            existing_dict = dict(existing) if existing else None
+            existing_details: List[Dict[str, Any]] = []
+            if existing_dict is not None:
+                existing_details = [
+                    dict(r) for r in conn.execute(
+                        "SELECT trans_type, activity FROM shift_details WHERE shift_date = ?",
+                        (shift_data["date"],)
+                    ).fetchall()
+                ]
+                existing_dict["details"] = existing_details
+
+            was_excluded = (
+                existing_dict is not None
+                and is_excluded_alert_pay_code(existing_dict.get("pay_code"), existing_details)
             )
-        )
-        if week_shift_count > 0 and (not was_complete_or_opt) and is_complete_or_opt_now:
-            is_newly_added_timecard = True
+            was_complete_or_opt = (not was_excluded) and (
+                is_shift_completed(existing_dict) or (
+                    existing_dict is not None
+                    and is_option_day_pay_code(existing_dict.get("pay_code"), existing_details)
+                )
+            )
+            is_complete_or_opt_now = (not is_excluded) and (
+                is_shift_completed(shift_data) or is_option_day_pay_code(
+                    shift_data.get("pay_code"), shift_data.get("details")
+                )
+            )
+            if week_shift_count > 0 and (not was_complete_or_opt) and is_complete_or_opt_now:
+                is_newly_added_timecard = True
 
-        if existing and not is_excluded:
-            # 1. Start Time check
-            old_start_dec = existing["start_time_dec"]
-            new_start_dec = shift_data.get("start_time_dec")
-            if old_start_dec is not None and new_start_dec is not None:
-                if abs(old_start_dec - new_start_dec) > 0.005:
-                    old_clock = existing["start_time_clock"] or f"{old_start_dec:.2f}"
-                    new_clock = shift_data.get("start_time_clock") or f"{new_start_dec:.2f}"
-                    diff_mins = round((new_start_dec - old_start_dec) * 60)
-                    old_val_str = f"{old_clock} ({old_start_dec:.2f})"
-                    new_val_str = f"{new_clock} ({new_start_dec:.2f})"
+            if existing and not is_excluded and not was_excluded:
+                # 1. Start Time check
+                old_start_dec = existing["start_time_dec"]
+                new_start_dec = shift_data.get("start_time_dec")
+                if old_start_dec is not None and new_start_dec is not None:
+                    if abs(old_start_dec - new_start_dec) > 0.005:
+                        old_clock = existing["start_time_clock"] or f"{old_start_dec:.2f}"
+                        new_clock = shift_data.get("start_time_clock") or f"{new_start_dec:.2f}"
+                        diff_mins = round((new_start_dec - old_start_dec) * 60)
+                        old_val_str = f"{old_clock} ({old_start_dec:.2f})"
+                        new_val_str = f"{new_clock} ({new_start_dec:.2f})"
+                        conn.execute("""
+                            INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
+                            VALUES (?, ?, 'Start Time', ?, ?, ?)
+                        """, (
+                            shift_data["week_end_date"],
+                            shift_data["date"],
+                            old_val_str,
+                            new_val_str,
+                            diff_mins
+                        ))
+                        if new_audits_out is not None:
+                            new_audits_out.append({
+                                "week_end_date": shift_data["week_end_date"],
+                                "date": shift_data["date"],
+                                "field_name": "Start Time",
+                                "old_value": old_val_str,
+                                "new_value": new_val_str,
+                                "diff_num": diff_mins
+                            })
+
+                # 2. End Time check
+                old_end_dec = existing["end_time_dec"]
+                new_end_dec = shift_data.get("end_time_dec")
+                if old_end_dec is not None and new_end_dec is not None:
+                    if abs(old_end_dec - new_end_dec) > 0.005:
+                        old_clock = existing["end_time_clock"] or f"{old_end_dec:.2f}"
+                        new_clock = shift_data.get("end_time_clock") or f"{new_end_dec:.2f}"
+                        diff_mins = round((new_end_dec - old_end_dec) * 60)
+                        old_val_str = f"{old_clock} ({old_end_dec:.2f})"
+                        new_val_str = f"{new_clock} ({new_end_dec:.2f})"
+                        conn.execute("""
+                            INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
+                            VALUES (?, ?, 'End Time', ?, ?, ?)
+                        """, (
+                            shift_data["week_end_date"],
+                            shift_data["date"],
+                            old_val_str,
+                            new_val_str,
+                            diff_mins
+                        ))
+                        if new_audits_out is not None:
+                            new_audits_out.append({
+                                "week_end_date": shift_data["week_end_date"],
+                                "date": shift_data["date"],
+                                "field_name": "End Time",
+                                "old_value": old_val_str,
+                                "new_value": new_val_str,
+                                "diff_num": diff_mins
+                            })
+
+                # 3. Meal / Unpaid check (only when both old and new records are active punch cards)
+                old_meal = existing["meal_unpaid_hours"] or 0.0
+                new_meal = shift_data.get("meal_unpaid_hours") or 0.0
+                if old_start_dec is not None and new_start_dec is not None and abs(old_meal - new_meal) > 0.005:
+                    diff_mins = round((new_meal - old_meal) * 60)
+                    old_val_str = f"{old_meal:.2f}h ({round(old_meal*60)}m)"
+                    new_val_str = f"{new_meal:.2f}h ({round(new_meal*60)}m)"
                     conn.execute("""
                         INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
-                        VALUES (?, ?, 'Start Time', ?, ?, ?)
+                        VALUES (?, ?, 'Meal/Unpaid', ?, ?, ?)
                     """, (
                         shift_data["week_end_date"],
                         shift_data["date"],
@@ -259,117 +358,63 @@ def upsert_shift(shift_data: Dict[str, Any], new_audits_out: Optional[List[Dict[
                         new_audits_out.append({
                             "week_end_date": shift_data["week_end_date"],
                             "date": shift_data["date"],
-                            "field_name": "Start Time",
+                            "field_name": "Meal/Unpaid",
                             "old_value": old_val_str,
                             "new_value": new_val_str,
                             "diff_num": diff_mins
                         })
 
-            # 2. End Time check
-            old_end_dec = existing["end_time_dec"]
-            new_end_dec = shift_data.get("end_time_dec")
-            if old_end_dec is not None and new_end_dec is not None:
-                if abs(old_end_dec - new_end_dec) > 0.005:
-                    old_clock = existing["end_time_clock"] or f"{old_end_dec:.2f}"
-                    new_clock = shift_data.get("end_time_clock") or f"{new_end_dec:.2f}"
-                    diff_mins = round((new_end_dec - old_end_dec) * 60)
-                    old_val_str = f"{old_clock} ({old_end_dec:.2f})"
-                    new_val_str = f"{new_clock} ({new_end_dec:.2f})"
-                    conn.execute("""
-                        INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
-                        VALUES (?, ?, 'End Time', ?, ?, ?)
-                    """, (
-                        shift_data["week_end_date"],
-                        shift_data["date"],
-                        old_val_str,
-                        new_val_str,
-                        diff_mins
-                    ))
-                    if new_audits_out is not None:
-                        new_audits_out.append({
-                            "week_end_date": shift_data["week_end_date"],
-                            "date": shift_data["date"],
-                            "field_name": "End Time",
-                            "old_value": old_val_str,
-                            "new_value": new_val_str,
-                            "diff_num": diff_mins
-                        })
-
-            # 3. Meal / Unpaid check (only when both old and new records are active punch cards)
-            old_meal = existing["meal_unpaid_hours"] or 0.0
-            new_meal = shift_data.get("meal_unpaid_hours") or 0.0
-            if old_start_dec is not None and new_start_dec is not None and abs(old_meal - new_meal) > 0.005:
-                diff_mins = round((new_meal - old_meal) * 60)
-                old_val_str = f"{old_meal:.2f}h ({round(old_meal*60)}m)"
-                new_val_str = f"{new_meal:.2f}h ({round(new_meal*60)}m)"
-                conn.execute("""
-                    INSERT INTO shift_audit_log (week_end_date, date, field_name, old_value, new_value, diff_num)
-                    VALUES (?, ?, 'Meal/Unpaid', ?, ?, ?)
-                """, (
-                    shift_data["week_end_date"],
-                    shift_data["date"],
-                    old_val_str,
-                    new_val_str,
-                    diff_mins
-                ))
-                if new_audits_out is not None:
-                    new_audits_out.append({
-                        "week_end_date": shift_data["week_end_date"],
-                        "date": shift_data["date"],
-                        "field_name": "Meal/Unpaid",
-                        "old_value": old_val_str,
-                        "new_value": new_val_str,
-                        "diff_num": diff_mins
-                    })
-
-        conn.execute("""
-            INSERT INTO shifts (
-                week_end_date, date, day_name, pay_code,
-                start_time_dec, start_time_clock, is_late,
-                end_time_dec, end_time_clock, meal_unpaid_hours,
-                pay_rate, total_hours, gross_pay
-            ) VALUES (
-                :week_end_date, :date, :day_name, :pay_code,
-                :start_time_dec, :start_time_clock, :is_late,
-                :end_time_dec, :end_time_clock, :meal_unpaid_hours,
-                :pay_rate, :total_hours, :gross_pay
-            )
-            ON CONFLICT(week_end_date, date) DO UPDATE SET
-                day_name = excluded.day_name,
-                pay_code = excluded.pay_code,
-                start_time_dec = excluded.start_time_dec,
-                start_time_clock = excluded.start_time_clock,
-                is_late = excluded.is_late,
-                end_time_dec = excluded.end_time_dec,
-                end_time_clock = excluded.end_time_clock,
-                meal_unpaid_hours = excluded.meal_unpaid_hours,
-                pay_rate = excluded.pay_rate,
-                total_hours = excluded.total_hours,
-                gross_pay = excluded.gross_pay
-        """, shift_data)
-    conn.close()
+            conn.execute("""
+                INSERT INTO shifts (
+                    week_end_date, date, day_name, pay_code,
+                    start_time_dec, start_time_clock, is_late,
+                    end_time_dec, end_time_clock, meal_unpaid_hours,
+                    pay_rate, total_hours, gross_pay
+                ) VALUES (
+                    :week_end_date, :date, :day_name, :pay_code,
+                    :start_time_dec, :start_time_clock, :is_late,
+                    :end_time_dec, :end_time_clock, :meal_unpaid_hours,
+                    :pay_rate, :total_hours, :gross_pay
+                )
+                ON CONFLICT(week_end_date, date) DO UPDATE SET
+                    day_name = excluded.day_name,
+                    pay_code = excluded.pay_code,
+                    start_time_dec = excluded.start_time_dec,
+                    start_time_clock = excluded.start_time_clock,
+                    is_late = excluded.is_late,
+                    end_time_dec = excluded.end_time_dec,
+                    end_time_clock = excluded.end_time_clock,
+                    meal_unpaid_hours = excluded.meal_unpaid_hours,
+                    pay_rate = excluded.pay_rate,
+                    total_hours = excluded.total_hours,
+                    gross_pay = excluded.gross_pay
+            """, shift_data)
+    finally:
+        conn.close()
     return is_newly_added_timecard
 
 
 def replace_shift_details(shift_date: str, details_list: List[Dict[str, Any]]):
     """Replaces shift breakdowns for a specific date using a single batch insert."""
     conn = get_connection()
-    with conn:
-        conn.execute("DELETE FROM shift_details WHERE shift_date = ?", (shift_date,))
-        if details_list:
-            rows = [{**item, "shift_date": shift_date} for item in details_list]
-            conn.executemany("""
-                INSERT INTO shift_details (
-                    shift_date, trans_type, op_type, center, sort,
-                    activity, rate, st_hrs, st_amt, ot_hrs, ot_amt,
-                    dt_hrs, dt_amt, eq_type, griev_num, flat_amt
-                ) VALUES (
-                    :shift_date, :trans_type, :op_type, :center, :sort,
-                    :activity, :rate, :st_hrs, :st_amt, :ot_hrs, :ot_amt,
-                    :dt_hrs, :dt_amt, :eq_type, :griev_num, :flat_amt
-                )
-            """, rows)
-    conn.close()
+    try:
+        with conn:
+            conn.execute("DELETE FROM shift_details WHERE shift_date = ?", (shift_date,))
+            if details_list:
+                rows = [{**item, "shift_date": shift_date} for item in details_list]
+                conn.executemany("""
+                    INSERT INTO shift_details (
+                        shift_date, trans_type, op_type, center, sort,
+                        activity, rate, st_hrs, st_amt, ot_hrs, ot_amt,
+                        dt_hrs, dt_amt, eq_type, griev_num, flat_amt
+                    ) VALUES (
+                        :shift_date, :trans_type, :op_type, :center, :sort,
+                        :activity, :rate, :st_hrs, :st_amt, :ot_hrs, :ot_amt,
+                        :dt_hrs, :dt_amt, :eq_type, :griev_num, :flat_amt
+                    )
+                """, rows)
+    finally:
+        conn.close()
 
 
 def save_parsed_week(
@@ -412,15 +457,17 @@ def save_parsed_week(
 def insert_correction(corr_data: Dict[str, Any]):
     """Inserts a correction log if not already present."""
     conn = get_connection()
-    with conn:
-        conn.execute("""
-            INSERT OR IGNORE INTO corrections (
-                timestamp, card_type, action, item, old_val, new_val, edited_by, reason_code
-            ) VALUES (
-                :timestamp, :card_type, :action, :item, :old_val, :new_val, :edited_by, :reason_code
-            )
-        """, corr_data)
-    conn.close()
+    try:
+        with conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO corrections (
+                    timestamp, card_type, action, item, old_val, new_val, edited_by, reason_code
+                ) VALUES (
+                    :timestamp, :card_type, :action, :item, :old_val, :new_val, :edited_by, :reason_code
+                )
+            """, corr_data)
+    finally:
+        conn.close()
 
 
 def upsert_entitlements(
@@ -433,69 +480,73 @@ def upsert_entitlements(
     """
     conn = get_connection()
     option_day_usages: List[Dict[str, Any]] = []
-    with conn:
-        existing_rows = conn.execute(
-            "SELECT timeoff_type, title, available_time, time_basis FROM entitlements"
-        ).fetchall()
-        existing_map = {r["timeoff_type"]: dict(r) for r in existing_rows}
+    try:
+        with conn:
+            existing_rows = conn.execute(
+                "SELECT timeoff_type, title, available_time, time_basis FROM entitlements"
+            ).fetchall()
+            existing_map = {r["timeoff_type"]: dict(r) for r in existing_rows}
 
-        if profile and profile.get("emp_id"):
-            conn.execute("""
-                INSERT INTO employee_profile (id, emp_id, emp_name, updated_at)
-                VALUES (1, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(id) DO UPDATE SET
-                    emp_id = excluded.emp_id,
-                    emp_name = excluded.emp_name,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (profile.get("emp_id"), profile.get("emp_name")))
+            if profile and profile.get("emp_id"):
+                conn.execute("""
+                    INSERT INTO employee_profile (id, emp_id, emp_name, updated_at)
+                    VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(id) DO UPDATE SET
+                        emp_id = excluded.emp_id,
+                        emp_name = excluded.emp_name,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (profile.get("emp_id"), profile.get("emp_name")))
 
-        for item in entitlements_list:
-            t_type = (item.get("timeoff_type") or "").strip().upper()
-            title = (item.get("title") or "").strip()
-            new_avail = float(item.get("available_time") or 0.0)
-            prev = existing_map.get(t_type)
-            is_opt_type = t_type in ("OPT", "OPW") or ("OPTION" in title.upper())
-            if prev is not None and is_opt_type:
-                old_avail = float(prev.get("available_time") or 0.0)
-                if old_avail > new_avail + 0.005:
-                    option_day_usages.append({
-                        "is_option_day": True,
-                        "from_entitlement_bank": True,
-                        "timeoff_type": t_type,
-                        "title": title or "Option Day",
-                        "old_available": old_avail,
-                        "new_available": new_avail,
-                        "used_amount": round(old_avail - new_avail, 2),
-                        "time_basis": item.get("time_basis") or prev.get("time_basis") or "Days"
-                    })
+            for item in entitlements_list:
+                t_type = (item.get("timeoff_type") or "").strip().upper()
+                title = (item.get("title") or "").strip()
+                new_avail = float(item.get("available_time") or 0.0)
+                prev = existing_map.get(t_type)
+                is_opt_type = t_type in ("OPT", "OPW") or ("OPTION" in title.upper())
+                if prev is not None and is_opt_type:
+                    old_avail = float(prev.get("available_time") or 0.0)
+                    if old_avail > new_avail + 0.005:
+                        option_day_usages.append({
+                            "is_option_day": True,
+                            "from_entitlement_bank": True,
+                            "timeoff_type": t_type,
+                            "title": title or "Option Day",
+                            "old_available": old_avail,
+                            "new_available": new_avail,
+                            "used_amount": round(old_avail - new_avail, 2),
+                            "time_basis": item.get("time_basis") or prev.get("time_basis") or "Days"
+                        })
 
-            conn.execute("""
-                INSERT INTO entitlements (timeoff_type, title, available_time, time_basis, next_earn_date, updated_at)
-                VALUES (:timeoff_type, :title, :available_time, :time_basis, :next_earn_date, CURRENT_TIMESTAMP)
-                ON CONFLICT(timeoff_type) DO UPDATE SET
-                    title = excluded.title,
-                    available_time = excluded.available_time,
-                    time_basis = excluded.time_basis,
-                    next_earn_date = excluded.next_earn_date,
-                    updated_at = CURRENT_TIMESTAMP
-            """, item)
-    conn.close()
+                conn.execute("""
+                    INSERT INTO entitlements (timeoff_type, title, available_time, time_basis, next_earn_date, updated_at)
+                    VALUES (:timeoff_type, :title, :available_time, :time_basis, :next_earn_date, CURRENT_TIMESTAMP)
+                    ON CONFLICT(timeoff_type) DO UPDATE SET
+                        title = excluded.title,
+                        available_time = excluded.available_time,
+                        time_basis = excluded.time_basis,
+                        next_earn_date = excluded.next_earn_date,
+                        updated_at = CURRENT_TIMESTAMP
+                """, item)
+    finally:
+        conn.close()
     return option_day_usages
 
 
 def get_entitlements() -> Dict[str, Any]:
     conn = get_connection()
-    prof_cur = conn.execute("SELECT emp_id, emp_name, updated_at FROM employee_profile WHERE id = 1")
-    prof = prof_cur.fetchone()
+    try:
+        prof_cur = conn.execute("SELECT emp_id, emp_name, updated_at FROM employee_profile WHERE id = 1")
+        prof = prof_cur.fetchone()
 
-    ent_cur = conn.execute("SELECT * FROM entitlements ORDER BY id ASC")
-    entitlements = [dict(r) for r in ent_cur.fetchall()]
-    conn.close()
+        ent_cur = conn.execute("SELECT * FROM entitlements ORDER BY id ASC")
+        entitlements = [dict(r) for r in ent_cur.fetchall()]
 
-    return {
-        "profile": dict(prof) if prof else None,
-        "entitlements": entitlements
-    }
+        return {
+            "profile": dict(prof) if prof else None,
+            "entitlements": entitlements
+        }
+    finally:
+        conn.close()
 
 
 def get_all_audit_logs() -> List[Dict[str, Any]]:
@@ -509,22 +560,25 @@ def get_all_audit_logs() -> List[Dict[str, Any]]:
 
 def log_sync_start() -> int:
     conn = get_connection()
-    with conn:
-        cursor = conn.execute("INSERT INTO sync_logs (status, message) VALUES ('IN_PROGRESS', 'Sync started')")
-        sync_id = cursor.lastrowid
-    conn.close()
-    return sync_id
+    try:
+        with conn:
+            cursor = conn.execute("INSERT INTO sync_logs (status, message) VALUES ('IN_PROGRESS', 'Sync started')")
+            return cursor.lastrowid
+    finally:
+        conn.close()
 
 
 def log_sync_complete(sync_id: int, status: str, message: str, weeks_synced: int = 0):
     conn = get_connection()
-    with conn:
-        conn.execute("""
-            UPDATE sync_logs
-            SET finished_at = CURRENT_TIMESTAMP, status = ?, message = ?, weeks_synced = ?
-            WHERE id = ?
-        """, (status, message, weeks_synced, sync_id))
-    conn.close()
+    try:
+        with conn:
+            conn.execute("""
+                UPDATE sync_logs
+                SET finished_at = CURRENT_TIMESTAMP, status = ?, message = ?, weeks_synced = ?
+                WHERE id = ?
+            """, (status, message, weeks_synced, sync_id))
+    finally:
+        conn.close()
 
 
 def get_all_weeks() -> List[Dict[str, Any]]:
@@ -573,6 +627,7 @@ def get_active_and_archived_weeks(limit: int = ACTIVE_WEEK_LIMIT) -> Dict[str, L
                 if det:
                     saved_details[wed] = det
             archive_payload = {
+                **saved_archive,
                 "archived_weeks": sorted_archived,
                 "week_details": saved_details
             }
@@ -729,44 +784,44 @@ def get_week_details(week_end_date: str) -> Optional[Dict[str, Any]]:
     conn = get_connection()
     try:
         week_row = conn.execute("SELECT * FROM weeks WHERE week_end_date = ?", (week_end_date,)).fetchone()
-        if not week_row:
-            vault = load_archive_vault()
-            return vault.get("week_details", {}).get(week_end_date)
+        if week_row:
+            shifts = [
+                dict(s) for s in conn.execute(
+                    "SELECT * FROM shifts WHERE week_end_date = ? ORDER BY date ASC",
+                    (week_end_date,)
+                ).fetchall()
+            ]
 
-        shifts = [
-            dict(s) for s in conn.execute(
-                "SELECT * FROM shifts WHERE week_end_date = ? ORDER BY date ASC",
-                (week_end_date,)
-            ).fetchall()
-        ]
+            if shifts:
+                shift_dates = [s["date"] for s in shifts]
+                placeholders = ",".join("?" for _ in shift_dates)
 
-        if shifts:
-            shift_dates = [s["date"] for s in shifts]
-            placeholders = ",".join("?" for _ in shift_dates)
+                details_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
+                for d_row in conn.execute(
+                    f"SELECT * FROM shift_details WHERE shift_date IN ({placeholders}) ORDER BY id ASC",
+                    shift_dates
+                ).fetchall():
+                    details_by_date[d_row["shift_date"]].append(dict(d_row))
 
-            details_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
-            for d_row in conn.execute(
-                f"SELECT * FROM shift_details WHERE shift_date IN ({placeholders}) ORDER BY id ASC",
-                shift_dates
-            ).fetchall():
-                details_by_date[d_row["shift_date"]].append(dict(d_row))
+                audits_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
+                for a_row in conn.execute(
+                    f"SELECT * FROM shift_audit_log WHERE date IN ({placeholders}) ORDER BY id DESC",
+                    shift_dates
+                ).fetchall():
+                    audits_by_date[a_row["date"]].append(dict(a_row))
 
-            audits_by_date: Dict[str, List[Dict[str, Any]]] = {d: [] for d in shift_dates}
-            for a_row in conn.execute(
-                f"SELECT * FROM shift_audit_log WHERE date IN ({placeholders}) ORDER BY id DESC",
-                shift_dates
-            ).fetchall():
-                audits_by_date[a_row["date"]].append(dict(a_row))
+                for s in shifts:
+                    s["details"] = details_by_date.get(s["date"], [])
+                    s["audit_history"] = audits_by_date.get(s["date"], [])
 
-            for s in shifts:
-                s["details"] = details_by_date.get(s["date"], [])
-                s["audit_history"] = audits_by_date.get(s["date"], [])
-
-        result = dict(week_row)
-        result["shifts"] = shifts
-        return result
+            result = dict(week_row)
+            result["shifts"] = shifts
+            return result
     finally:
         conn.close()
+
+    vault = load_archive_vault()
+    return vault.get("week_details", {}).get(week_end_date)
 
 
 def get_all_corrections() -> List[Dict[str, Any]]:
@@ -791,15 +846,17 @@ def get_latest_sync_status() -> Optional[Dict[str, Any]]:
 def clear_all_data():
     """Clears all active session timecard, time-off, and profile records, but preserves the permanent archive vault."""
     conn = get_connection()
-    with conn:
-        conn.executescript("""
-            DELETE FROM weeks;
-            DELETE FROM shifts;
-            DELETE FROM shift_details;
-            DELETE FROM shift_audit_log;
-            DELETE FROM corrections;
-            DELETE FROM entitlements;
-            DELETE FROM employee_profile;
-            DELETE FROM sync_logs;
-        """)
-    conn.close()
+    try:
+        with conn:
+            conn.executescript("""
+                DELETE FROM weeks;
+                DELETE FROM shifts;
+                DELETE FROM shift_details;
+                DELETE FROM shift_audit_log;
+                DELETE FROM corrections;
+                DELETE FROM entitlements;
+                DELETE FROM employee_profile;
+                DELETE FROM sync_logs;
+            """)
+    finally:
+        conn.close()

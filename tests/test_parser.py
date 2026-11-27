@@ -266,5 +266,39 @@ class TestTimecardParser(unittest.TestCase):
         self.assertEqual(len(parsed["corrections"]), 1)
         self.assertEqual(parsed["corrections"][0]["new_val"], "09.50*")
 
+    def test_parse_float_and_time_utils_edge_cases(self):
+        from backend.parser import parse_float
+        from backend.time_utils import parse_decimal_time, decimal_hours_to_hhmm
+
+        self.assertEqual(parse_float(None), 0.0)
+        self.assertEqual(parse_float(True), 0.0)
+        self.assertEqual(parse_float(False), 0.0)
+        self.assertEqual(parse_float(float("nan")), 0.0)
+        self.assertEqual(parse_float(float("inf")), 0.0)
+        self.assertEqual(parse_float("--"), 0.0)
+        self.assertAlmostEqual(parse_float("$1,234.50"), 1234.50)
+
+        dec0, clk0, late0 = parse_decimal_time("0.00")
+        self.assertEqual((dec0, clk0, late0), (0.0, "12:00 AM", False))
+        dec12, clk12, late12 = parse_decimal_time("12.00*")
+        self.assertEqual((dec12, clk12, late12), (12.0, "12:00 PM", True))
+        self.assertEqual(parse_decimal_time("null"), (None, None, False))
+        self.assertEqual(decimal_hours_to_hhmm(None), "0h 0m")
+        self.assertEqual(decimal_hours_to_hhmm(9.5), "9h 30m")
+
+        # Malformed data-date with slashes/spaces must never raise CSS selector errors
+        slash_date_html = """<!DOCTYPE html><html><body>
+          <div class="timecard-wrapper">
+            <div class="timecard-list-view"><table><tbody>
+              <tr class="timecard-card" data-date="12/21/2026">
+                <td>Mon 12/21/2026</td><td>PAY ACTUAL</td><td>9.00</td><td>17.50</td><td>0.50</td><td>$46.98</td><td>8.00</td><td>$375.84</td>
+              </tr>
+            </tbody></table></div>
+          </div>
+        </body></html>"""
+        parsed_slash = parse_timecard_html(slash_date_html)
+        self.assertEqual(len(parsed_slash["shifts"]), 1)
+        self.assertAlmostEqual(parsed_slash["shifts"][0]["total_hours"], 8.00)
+
 if __name__ == "__main__":
     unittest.main()
